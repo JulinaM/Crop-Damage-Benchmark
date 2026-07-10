@@ -3,7 +3,7 @@
 #SBATCH --job-name=Terramind
 #SBATCH --account=PGS0413
 #SBATCH --gpus-per-node=1
-#SBATCH --nodes=2
+#SBATCH --nodes=1
 #SBATCH --ntasks=2
 #SBATCH --cpus-per-task=8
 #SBATCH --time=00:30:00

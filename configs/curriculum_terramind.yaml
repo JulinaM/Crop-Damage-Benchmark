@@ -6,9 +6,9 @@ experiment_name: curriculum-learning
 
 curriculum:
   enabled:         true
-  flood_epochs:    6       # was 16; best ckpt was last epoch — add 4 more to reach plateau
-  conflict_epochs: 4       # was 8; train_loss still 0.38↓ at ep24; need full convergence
-  stage2_lr:       0.00002  # 50x lower than Stage 1 — correct, keep
+  flood_epochs:    20       # was 16; best ckpt was last epoch — add 4 more to reach plateau
+  conflict_epochs: 40       # was 8; train_loss still 0.38↓ at ep24; need full convergence
+  stage2_lr:       0.00001  # 50x lower than Stage 1 — correct, keep
 
 flood_loader:
   modalities:
@@ -86,6 +86,19 @@ holdout_loader:
   stride: 224
   num_workers: 2
 
+flood_holdout_loader:
+  modalities:
+    S2L2A:
+      before: flood_data/Test/Before/S2L2A
+      after: flood_data/Test/After/S2L2A
+    S1GRD:
+      before: flood_data/Test/Before/S1GRD
+      after: flood_data/Test/After/S1GRD
+  label_dir: flood_data/Test/Labels
+  patch_size: 224
+  stride: 224
+  num_workers: 2
+
 model:
   num_classes: 3
   positive_class: 2
@@ -127,8 +140,14 @@ decoder:
   channels: [64, 128, 256, 512, 1024]
 
 trainer:
-  n_epochs: 16   # overridden by curriculum total (flood_epochs + conflict_epochs = 50); kept in sync
+  n_epochs: 60          # upper bound for non-curriculum runs only; curriculum uses flood/conflict_epochs
   log_interval: 1
+  early_stopping_patience: 3   # consecutive epochs without val_loss improvement before stopping a stage
+  scheduler:
+    name: ReduceLROnPlateau     # ReduceLROnPlateau | CosineAnnealingLR
+    factor:   0.5               # LR multiplied by this factor on plateau
+    patience: 3                 # epochs without improvement before LR reduction
+    min_lr:   1.0e-6            # floor — LR will never go below this
   
 use_wandb: True
 

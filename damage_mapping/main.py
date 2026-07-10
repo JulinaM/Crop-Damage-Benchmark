@@ -78,25 +78,34 @@ def build_loader(loader_cfg: DictConfig, split: str) -> DataLoader:
     )
 
 
-def build_holdout_loader(cfg: DictConfig) -> DataLoader | None:
-    holdout_cfg = cfg.get("holdout_loader")
-    if holdout_cfg is None:
+def build_holdout_loader(loader_cfg: DictConfig | None) -> DataLoader | None:
+    if loader_cfg is None:
         return None
 
-    print("-->", holdout_cfg)
-    modalities = {name: (paths.before, paths.after) for name, paths in holdout_cfg.modalities.items()}
-    print(modalities)
+    modalities = {name: (paths.before, paths.after) for name, paths in loader_cfg.modalities.items()}
     dataset = TestLoader(
         modalities=modalities,
-        label_dir=holdout_cfg.label_dir,
-        patch_size=holdout_cfg.patch_size,
-        stride=holdout_cfg.stride,
+        label_dir=loader_cfg.label_dir,
+        patch_size=loader_cfg.patch_size,
+        stride=loader_cfg.stride,
     )
     return DataLoader(
         dataset,
         batch_size=None,
-        num_workers=getattr(holdout_cfg, "num_workers", 0),
+        num_workers=getattr(loader_cfg, "num_workers", 0),
     )
+
+
+def build_holdout_loaders(cfg: DictConfig) -> dict[str, DataLoader]:
+    holdout_loaders = {}
+    for eval_name, loader_key in (
+        ("conflict", "holdout_loader"),
+        ("flood", "flood_holdout_loader"),
+    ):
+        loader = build_holdout_loader(cfg.get(loader_key))
+        if loader is not None:
+            holdout_loaders[eval_name] = loader
+    return holdout_loaders
 
 
 def build_model_components(cfg: DictConfig, device: torch.device, train_loader: DataLoader):
@@ -184,7 +193,7 @@ def main(cfg: DictConfig):
         curriculum_manager = None
         train_loader = build_loader(cfg.train_loader, "train")
         val_loader   = build_loader(cfg.validation_loader, "validation")
-    holdout_loader = build_holdout_loader(cfg)
+    holdout_loaders = build_holdout_loaders(cfg)
     encoder, change_fusion, decoder, criterion, optimizer = build_model_components(cfg, device, train_loader)
 
     encoder_total = sum(p.numel() for p in encoder.parameters())
@@ -217,18 +226,23 @@ def main(cfg: DictConfig):
         use_wandb=cfg.use_wandb,
         curriculum_manager=curriculum_manager,
     )
-    evaluator = Evaluator(
-        cfg=cfg,
-        exp_dir=exp_dir,
-        ckpt_dir=ckpt_dir,
-        device=device,
-        dataloader=holdout_loader,
-        logger=logger,
-        use_wandb=cfg.use_wandb,
-    )
-
     best_val_iou = trainer.train()
-    evaluator.evaluate()
+    if holdout_loaders:
+        for eval_name, holdout_loader in holdout_loaders.items():
+            evaluator = Evaluator(
+                cfg=cfg,
+                exp_dir=exp_dir,
+                ckpt_dir=ckpt_dir,
+                device=device,
+                dataloader=holdout_loader,
+                logger=logger,
+                use_wandb=cfg.use_wandb,
+                eval_name=eval_name,
+            )
+            checkpoint_prefix = "best_flood" if eval_name == "flood" else "best"
+            evaluator.evaluate(checkpoint_prefix=checkpoint_prefix)
+    else:
+        logger.info("Holdout evaluator skipped: no holdout dataloaders were configured.")
 
     if distributed:
         torch.distributed.destroy_process_group()

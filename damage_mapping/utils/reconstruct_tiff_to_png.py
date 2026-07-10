@@ -60,14 +60,47 @@ LEGEND_ENTRIES = {
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
-def find_latest_run(runs_dir: Path) -> Path:
+def find_latest_run(runs_dir: Path, eval_name: str | None = None) -> Path:
     candidates = [
         d for d in sorted(runs_dir.glob('terramind_*'))
-        if (d / 'metrics.txt').exists() and (d / 'geotiffs').exists()
+        if _resolve_eval_paths(d, eval_name)["metrics_path"].exists()
+        and _resolve_eval_paths(d, eval_name)["pred_dir"].exists()
     ]
     if not candidates:
         raise FileNotFoundError(f'No successful runs found in {runs_dir}')
     return candidates[-1]
+
+
+def _resolve_eval_paths(run_dir: Path, eval_name: str | None = None) -> dict[str, Path]:
+    if eval_name is None:
+        if (run_dir / 'geotiffs').exists() or (run_dir / 'metrics.txt').exists():
+            eval_dir = run_dir
+        elif (run_dir / 'conflict').exists():
+            eval_dir = run_dir / 'conflict'
+        else:
+            eval_dir = run_dir
+    else:
+        eval_dir = run_dir / eval_name
+
+    return {
+        "eval_dir": eval_dir,
+        "pred_dir": eval_dir / 'geotiffs',
+        "metrics_path": eval_dir / 'metrics.txt',
+        "poster_dir": eval_dir / 'poster_figures',
+    }
+
+
+def _resolve_holdout_dirs(project_root: Path, eval_name: str | None = None) -> dict[str, Path]:
+    if eval_name == "flood":
+        input_root = project_root / 'data/input/flood_data/Test'
+    else:
+        input_root = project_root / 'data/input/Images_large/Test'
+
+    return {
+        "before": input_root / 'Before/S2L2A',
+        "after": input_root / 'After/S2L2A',
+        "labels": input_root / 'Labels',
+    }
 
 
 def read_single_band(path: Path) -> np.ndarray:
@@ -128,7 +161,8 @@ def make_poster_figure(
     label_name:     str,
     pred_name:      str,
     output_path:    Path,
-    config_info: dict
+    config_info: dict,
+    display_method: False
 ) -> None:
     """
     Render a single three-panel poster figure and save as 300 DPI TIFF.
@@ -209,7 +243,7 @@ def make_poster_figure(
     # ------------------------------------------------------------------
     fig.text(
         0.5, 0.97,
-        'Agricultural Damage Mapping (Holdout Set)',
+        'Flood Damage Mapping (Holdout Set)',
         ha='center', va='top',
         fontsize=18, fontfamily=sans, fontweight='bold', color='#111111',
     )
@@ -225,16 +259,18 @@ def make_poster_figure(
     # ------------------------------------------------------------------
     # Paper-style header (method + experiment info)
     # ------------------------------------------------------------------
-    method_parts = []
-    for k, v in config_info.items():
-        label = DISPLAY_NAMES.get(k, k.split('.')[-1])
-        method_parts.append(f"{label}={v}")
-    method_text = ", ".join(method_parts)
-    fig.text(
-        0.5, 0.90,
-        f"{method_text}",
-        ha='center', va='top', fontsize=11, fontfamily=sans, color='#222222',
-    )
+    if display_method:
+        method_parts = []
+        for k, v in config_info.items():
+            label = DISPLAY_NAMES.get(k, k.split('.')[-1])
+            if v:
+                method_parts.append(f"{label}={v}")
+        method_text = ", ".join(method_parts)
+        fig.text(
+            0.5, 0.90,
+            f"{method_text}",
+            ha='center', va='top', fontsize=11, fontfamily=sans, color='#222222',
+        )
 
     # ------------------------------------------------------------------
     # Legend — placed in the reserved right column, top-aligned, no overlap
@@ -354,19 +390,26 @@ def extract_config_params(cfg: dict, keys: list) -> dict:
 # ---------------------------------------------------------------------------
 # Main loop
 # ---------------------------------------------------------------------------
-def main(run_dirr=None, config_keys=None):
+def main(run_dirr=None, display_method=False, config_keys=None, eval_name=None, dataset=None):
     PROJECT_ROOT = Path('/users/PGS0218/julina/projects/geography/damage_mapping_terramind/V2')
     EXP_DIR = PROJECT_ROOT / "data/experiments"
+    if isinstance(display_method, (list, tuple)) and config_keys is None:
+        config_keys = list(display_method)
+        display_method = False
+    eval_name = dataset or eval_name
+
     if run_dirr:
         run_dir = EXP_DIR / run_dirr
     else:
         run_dir = EXP_DIR / 'curriculum-learning/curriculum_terramind_2026-04-20_160535'
     # print("--->", run_dir)
 
-    pred_dir = run_dir / 'geotiffs'
-    holdout_before_dir  = PROJECT_ROOT / 'data/input/Images_large/Test/Before/S2L2A'
-    holdout_after_dir   = PROJECT_ROOT / 'data/input/Images_large/Test/After/S2L2A'
-    holdout_label_dir   = PROJECT_ROOT / 'data/input/Images_large/Test/Labels'
+    eval_paths = _resolve_eval_paths(run_dir, eval_name)
+    holdout_dirs = _resolve_holdout_dirs(PROJECT_ROOT, eval_name)
+    pred_dir = eval_paths["pred_dir"]
+    holdout_before_dir = holdout_dirs["before"]
+    holdout_after_dir = holdout_dirs["after"]
+    holdout_label_dir = holdout_dirs["labels"]
 
     pred_files   = sorted(pred_dir.glob('predicted_map_*_colored.tif'))
     label_files  = sorted(holdout_label_dir.glob('*.tif'))
@@ -374,15 +417,17 @@ def main(run_dirr=None, config_keys=None):
     after_files  = sorted(holdout_after_dir.glob('*.tif'))
 
     print(f'\nRun directory      : {run_dirr}')
+    print(f'Evaluation set     : {eval_name or "default"}')
+    print(f'Prediction dir     : {pred_dir}')
     print(f'Prediction files   : {len(pred_files)}')
     print(f'Holdout labels     : {len(label_files)}')
     assert len(pred_files) == len(label_files) == len(before_files) == len(after_files), 'Holdout file counts do not match.'
-    metrics_df = parse_metrics(run_dir / 'metrics.txt')
+    metrics_df = parse_metrics(eval_paths["metrics_path"])
     metrics_df['label_file']      = [p.name for p in label_files]
     metrics_df['prediction_file'] = [p.name for p in pred_files]
     # display(metrics_df)
 
-    poster_dir = run_dir / 'poster_figures'
+    poster_dir = eval_paths["poster_dir"]
     poster_dir.mkdir(exist_ok=True)
 
     cfg = load_config(run_dir / '.hydra/config.yaml')
@@ -410,7 +455,8 @@ def main(run_dirr=None, config_keys=None):
             label_name     = label_files[tile_idx].name,
             pred_name      = pred_files[tile_idx].name,
             output_path    = out_path,
-            config_info    = config_info
+            config_info    = config_info,
+            display_method = display_method
         )
 
     # print('\nAll tiles complete.')

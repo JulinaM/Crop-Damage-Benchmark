@@ -33,6 +33,7 @@ class Evaluator:
         dataloader: DataLoader | None,
         logger: logging.Logger | None = None,
         use_wandb: bool = False,
+        eval_name: str = "holdout",
     ) -> None:
         self.cfg = cfg
         self.exp_dir = Path(exp_dir)
@@ -40,7 +41,10 @@ class Evaluator:
         self.device = torch.device(device)
         self.dataloader = dataloader
         self.logger = logger or logging.getLogger(__name__)
-        self.writer = SummaryWriter(log_dir=str(self.exp_dir))
+        self.eval_name = eval_name
+        self.output_dir = self.exp_dir / eval_name
+        self.output_dir.mkdir(parents=True, exist_ok=True)
+        self.writer = SummaryWriter(log_dir=str(self.output_dir))
         self.use_wandb = use_wandb
 
         if self.use_wandb:
@@ -50,17 +54,25 @@ class Evaluator:
     def is_configured(self) -> bool:
         return self.dataloader is not None
 
-    def evaluate(self, checkpoint_path: str | Path | None = None) -> dict[int, dict[str, float]] | None:
+    def evaluate(
+        self,
+        checkpoint_path: str | Path | None = None,
+        checkpoint_prefix: str = "best",
+    ) -> dict[int, dict[str, float]] | None:
         if not self.is_configured():
-            self.logger.info("Holdout evaluator skipped: no holdout dataloader was provided.")
+            self.logger.info("%s evaluator skipped: no dataloader was provided.", self.eval_name)
             self.writer.close()
             return None
 
-        checkpoint_path = Path(checkpoint_path) if checkpoint_path is not None else self._find_best_checkpoint()
+        checkpoint_path = (
+            Path(checkpoint_path)
+            if checkpoint_path is not None
+            else self._find_best_checkpoint(checkpoint_prefix)
+        )
         encoder, change_fusion, decoder = self._load_models(checkpoint_path)
 
-        self.logger.info("Evaluator started")
-        self.logger.info("Holdout patches: %d", len(self.dataloader.dataset))
+        self.logger.info("%s evaluator started", self.eval_name)
+        self.logger.info("%s patches: %d", self.eval_name, len(self.dataloader.dataset))
         self.logger.info("Using checkpoint: %s", checkpoint_path)
 
         tile_reconstruction, padding, metas = self._collect_patch_outputs(self.dataloader, encoder, change_fusion, decoder)
@@ -76,14 +88,16 @@ class Evaluator:
         metrics = self._save_metrics_and_visualizations(image_tiles_pred, image_tiles_true)
         self.writer.close()
 
-        self.logger.info("Saved holdout GeoTIFFs to %s", geotiff_dir)
-        self.logger.info("Holdout evaluation completed")
+        self.logger.info("Saved %s GeoTIFFs to %s", self.eval_name, geotiff_dir)
+        self.logger.info("%s evaluation completed", self.eval_name)
         return metrics
 
-    def _find_best_checkpoint(self) -> Path:
-        matches = sorted(self.ckpt_dir.glob("best_model_*.pt"))
+    def _find_best_checkpoint(self, checkpoint_prefix: str = "best") -> Path:
+        matches = sorted(self.ckpt_dir.glob(f"{checkpoint_prefix}_model_*.pt"))
         if not matches:
-            raise FileNotFoundError(f"No best checkpoint found in {self.ckpt_dir}")
+            raise FileNotFoundError(
+                f"No {checkpoint_prefix} checkpoint found in {self.ckpt_dir}"
+            )
         return matches[-1]
 
     def _load_models(self, checkpoint_path: Path):
@@ -130,7 +144,9 @@ class Evaluator:
                     metas[idx] = meta
 
         if not tile_reconstruction:
-            raise RuntimeError("No holdout patches were generated. Check holdout_loader paths.")
+            raise RuntimeError(
+                f"No {self.eval_name} patches were generated. Check the configured loader paths."
+            )
         return tile_reconstruction, padding, metas
 
     def _reconstruct_tiles(
@@ -174,7 +190,7 @@ class Evaluator:
             image_tiles_pred[idx] = torch.where(truth == 0, torch.zeros_like(prediction), prediction)
 
     def _save_geotiffs(self, image_tiles_pred: dict[int, torch.Tensor], metas: dict[int, dict]) -> Path:
-        geotiff_dir = self.exp_dir / "geotiffs"
+        geotiff_dir = self.output_dir / "geotiffs"
         geotiff_dir.mkdir(parents=True, exist_ok=True)
 
         for idx, prediction in image_tiles_pred.items():
@@ -209,20 +225,20 @@ class Evaluator:
             positive_class=self.cfg.model.positive_class,
             negative_class=self.cfg.model.negative_class,
         )
-        metrics_path = self.exp_dir / "metrics.txt"
+        metrics_path = self.output_dir / "metrics.txt"
         with metrics_path.open("w") as handle:
             for idx, image_metrics in metrics.items():
                 handle.write(f"\nImage {idx} metrics:\n")
                 for key, value in image_metrics.items():
                     handle.write(f"  {key}: {value:.4f}\n")
-                    self.writer.add_scalar(f"holdout/{key}", value, global_step=idx)
+                    self.writer.add_scalar(f"{self.eval_name}/{key}", value, global_step=idx)
 
         for idx in list(image_tiles_pred.keys())[:3]:
             pred_rgb = tensor_to_color_image(image_tiles_pred[idx], num_classes=self.cfg.model.num_classes)
             true_rgb = tensor_to_color_image(image_tiles_true[idx], num_classes=self.cfg.model.num_classes)
-            self.writer.add_image(f"holdout/comparison_{idx}", torch.cat((true_rgb, pred_rgb), dim=2))
+            self.writer.add_image(f"{self.eval_name}/comparison_{idx}", torch.cat((true_rgb, pred_rgb), dim=2))
 
-        self.logger.info("Saved holdout metrics to %s", metrics_path)
+        self.logger.info("Saved %s metrics to %s", self.eval_name, metrics_path)
         self._write_wandb(metrics)
         return metrics
 
@@ -234,9 +250,9 @@ class Evaluator:
         summary = {}
         for name in metric_names:
             values = [image_metrics[name] for image_metrics in metrics.values()]
-            summary[f"holdout/{name}_mean"] = float(np.mean(values))
-            summary[f"holdout/{name}_min"] = float(np.min(values))
-            summary[f"holdout/{name}_max"] = float(np.max(values))
+            summary[f"{self.eval_name}/{name}_mean"] = float(np.mean(values))
+            summary[f"{self.eval_name}/{name}_min"] = float(np.min(values))
+            summary[f"{self.eval_name}/{name}_max"] = float(np.max(values))
 
         self.wandb.summary.update(summary)
 
