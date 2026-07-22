@@ -164,35 +164,34 @@ def fix_seed(seed):
 
 
 
-def save_checkpoint(encoder, decoder, optimizer, epoch, val_loss, cfg, save_dir="checkpoints"):
+def save_checkpoint(encoder, change_fusion, decoder, optimizer, epoch, val_loss, cfg,
+                    save_dir="checkpoints", prefix="best"):
     """
-    Save model checkpoint and config while deleting existing configs/models.
-    In practice, will only will be activated when current loss < existing best loss
-    Realistically should not be rewriting configs each time as they don't change while in the same experiment
-    -->edit to check if existing config, if not write config, if so, do nothing
+    Save model checkpoint and config, deleting the previous best for this prefix.
+    Use distinct prefixes per curriculum stage ("best_flood" vs "best") so Stage 1
+    checkpoints are not deleted when Stage 2 saves a new best.
     """
     os.makedirs(save_dir, exist_ok=True)
 
-    # #Delete curent best checkpoint and config
-    old_checkpoints = glob.glob(os.path.join(save_dir, "best_model_*.pt"))
+    old_checkpoints = glob.glob(os.path.join(save_dir, f"{prefix}_model_*.pt"))
     for f in old_checkpoints:
         os.remove(f)
 
-    old_configs = glob.glob(os.path.join(save_dir, "best_config_*.yaml"))
+    old_configs = glob.glob(os.path.join(save_dir, f"{prefix}_config_*.yaml"))
     for f in old_configs:
         os.remove(f)
 
-    # Save new best checkpoint & config
-    checkpoint_path = os.path.join(save_dir, f"best_model_epoch{epoch}_valloss{val_loss:.4f}.pt")
+    checkpoint_path = os.path.join(save_dir, f"{prefix}_model_epoch{epoch}_valloss{val_loss:.4f}.pt")
     torch.save({
         'epoch': epoch,
         'encoder_state_dict': encoder.state_dict(),
+        'change_fusion_state_dict': change_fusion.state_dict(),
         'decoder_state_dict': decoder.state_dict(),
         'optimizer_state_dict': optimizer.state_dict() if optimizer is not None else None,
         'val_loss': val_loss,
     }, checkpoint_path)
 
-    cfg_path = os.path.join(save_dir, f"best_config_epoch{epoch}_valloss{val_loss:.4f}.yaml")
+    cfg_path = os.path.join(save_dir, f"{prefix}_config_epoch{epoch}_valloss{val_loss:.4f}.yaml")
     OmegaConf.save(cfg, cfg_path)
     print(f"Saved new best checkpoint: {checkpoint_path}")
     return checkpoint_path

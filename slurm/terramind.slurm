@@ -3,7 +3,7 @@
 #SBATCH --job-name=Terramind
 #SBATCH --account=PGS0413
 #SBATCH --gpus-per-node=1
-#SBATCH --nodes=2
+#SBATCH --nodes=1
 #SBATCH --ntasks=2
 #SBATCH --cpus-per-task=8
 #SBATCH --time=00:30:00
@@ -15,9 +15,9 @@ set -Eeuo pipefail
 
 ## USAGE::
 # Minimal (default): sbatch slurm/terramind.slurm
-# Debug infra logs: sbatch --export=DATA_SIZE=small_search,SLURM_LOG_LEVEL=debug slurm/terramind.slurm
+# Debug infra logs: sbatch --export=DATA_SIZE=curriculum_terramind,SLURM_LOG_LEVEL=debug slurm/terramind.slurm
 
-DATA_SIZE=${DATA_SIZE:-large} #large|small|large_search|small_search|old
+DATA_SIZE=${DATA_SIZE:-large} #curriculum_terramind|large|small|large_search|small_search|old
 SLURM_LOG_LEVEL="${SLURM_LOG_LEVEL:-minimal}"  # minimal|debug
 PROJ_DIR="/users/PGS0218/julina/projects/geography/damage_mapping_terramind/V2"
 LOG_DIR="${PROJ_DIR}/data/slurm_logs"
@@ -65,6 +65,11 @@ case $DATA_SIZE in
   large)
     CMD=(
       python3 -u -m damage_mapping 
+    )
+    ;;
+  curriculum_terramind)
+    CMD=(
+      python3 -u -m damage_mapping "--config-name=curriculum_terramind"
     )
     ;;
   small)

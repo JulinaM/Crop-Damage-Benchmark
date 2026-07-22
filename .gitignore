@@ -6,3 +6,9 @@
 ./wandb
 ./damage_mapping/datasets/__pycache__
 ./damage_mapping/models/__pycache__
+./flood_to_cropland_etl/generated/*
+./flood_to_cropland_etl/Sen1Floods11/*
+./flood_to_cropland_etl/Sen1Floods11_data/*
+./examples/*.csv
+./examples/*.png
+./data/claude-summary/*

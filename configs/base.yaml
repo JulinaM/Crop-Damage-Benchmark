@@ -7,6 +7,10 @@ wandb:
   entity: julinam-kent-state-university
   mode: online
 
+change:
+  method: difference
+  attention_heads: 4
+
 hydra:
   # mode: run
   run:

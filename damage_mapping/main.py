@@ -11,8 +11,10 @@ from torch.utils.data import DataLoader
 
 from damage_mapping.Evaluator import Evaluator
 from damage_mapping.Trainer import Trainer
+from damage_mapping.datasets.CurriculumDataManager import CurriculumDataManager
 from damage_mapping.datasets.DataLoader import TestLoader, Train_Val_Loader
 from damage_mapping.logger import init_logger
+from damage_mapping.models.change_fusion import build_change_fusion
 from damage_mapping.models.decoders import build_decoder
 from damage_mapping.models.encoders import build_encoder
 from damage_mapping.utils.losses import build_criterion
@@ -44,10 +46,16 @@ def init_wandb_run(cfg: DictConfig, exp_dir: Path, exp_name: str):
 
     run = wandb.init(**wandb_settings)
     wandb.define_metric("train/global_step")
-    wandb.define_metric("train/*", step_metric="train/global_step")
+    wandb.define_metric("train/*",          step_metric="train/global_step")
+    wandb.define_metric("train/flood/*",    step_metric="train/global_step")
+    wandb.define_metric("train/conflict/*", step_metric="train/global_step")
     wandb.define_metric("val/epoch")
-    wandb.define_metric("val/*", step_metric="val/epoch")
-    wandb.define_metric("best/*", step_metric="val/epoch")
+    wandb.define_metric("val/*",            step_metric="val/epoch")
+    wandb.define_metric("val/flood/*",      step_metric="val/epoch")
+    wandb.define_metric("val/conflict/*",   step_metric="val/epoch")
+    wandb.define_metric("best/*",           step_metric="val/epoch")
+    wandb.define_metric("best/flood/*",     step_metric="val/epoch")
+    wandb.define_metric("best/conflict/*",  step_metric="val/epoch")
     return run
 
 
@@ -70,23 +78,34 @@ def build_loader(loader_cfg: DictConfig, split: str) -> DataLoader:
     )
 
 
-def build_holdout_loader(cfg: DictConfig) -> DataLoader | None:
-    holdout_cfg = cfg.get("holdout_loader")
-    if holdout_cfg is None:
+def build_holdout_loader(loader_cfg: DictConfig | None) -> DataLoader | None:
+    if loader_cfg is None:
         return None
 
-    modalities = {name: (paths.before, paths.after) for name, paths in holdout_cfg.modalities.items()}
+    modalities = {name: (paths.before, paths.after) for name, paths in loader_cfg.modalities.items()}
     dataset = TestLoader(
         modalities=modalities,
-        label_dir=holdout_cfg.label_dir,
-        patch_size=holdout_cfg.patch_size,
-        stride=holdout_cfg.stride,
+        label_dir=loader_cfg.label_dir,
+        patch_size=loader_cfg.patch_size,
+        stride=loader_cfg.stride,
     )
     return DataLoader(
         dataset,
         batch_size=None,
-        num_workers=getattr(holdout_cfg, "num_workers", 0),
+        num_workers=getattr(loader_cfg, "num_workers", 0),
     )
+
+
+def build_holdout_loaders(cfg: DictConfig) -> dict[str, DataLoader]:
+    holdout_loaders = {}
+    for eval_name, loader_key in (
+        ("conflict", "holdout_loader"),
+        ("flood", "flood_holdout_loader"),
+    ):
+        loader = build_holdout_loader(cfg.get(loader_key))
+        if loader is not None:
+            holdout_loaders[eval_name] = loader
+    return holdout_loaders
 
 
 def build_model_components(cfg: DictConfig, device: torch.device, train_loader: DataLoader):
@@ -107,17 +126,20 @@ def build_model_components(cfg: DictConfig, device: torch.device, train_loader: 
             cfg.encoder.build_kwargs["modality_channels"] = modality_channels
 
     encoder = build_encoder(cfg.encoder)
-    decoder = build_decoder(cfg.decoder, encoder, num_classes=cfg.model.num_classes)
+    change_fusion = build_change_fusion(cfg.change, encoder)
+    decoder = build_decoder(cfg.decoder, change_fusion, num_classes=cfg.model.num_classes)
     encoder.to(device)
+    change_fusion.to(device)
     decoder.to(device)
 
     encoder_name = str(getattr(cfg.encoder, "name", "Terramind")).strip().lower()
+    optimized_params = list(change_fusion.parameters()) + list(decoder.parameters())
     if encoder_name == "unet" or bool(getattr(cfg.encoder, "finetune", False)):
-        optimizer = optim.Adam(list(encoder.parameters()) + list(decoder.parameters()), lr=cfg.model.learning_rate)
+        optimizer = optim.Adam(list(encoder.parameters()) + optimized_params, lr=cfg.model.learning_rate)
     else:
-        optimizer = optim.Adam(decoder.parameters(), lr=cfg.model.learning_rate)
+        optimizer = optim.Adam(optimized_params, lr=cfg.model.learning_rate)
 
-    return encoder, decoder, criterion, optimizer
+    return encoder, change_fusion, decoder, criterion, optimizer
 
 
 @hydra.main(version_base="1.2", config_path=str(CONFIG_DIR), config_name="terramind")
@@ -152,18 +174,39 @@ def main(cfg: DictConfig):
     logger.info("Device name: %s", device)
     logger.info("The experiment is stored in %s", exp_dir)
 
-    train_loader = build_loader(cfg.train_loader, "train")
-    val_loader = build_loader(cfg.validation_loader, "validation")
-    holdout_loader = build_holdout_loader(cfg)
-    encoder, decoder, criterion, optimizer = build_model_components(cfg, device, train_loader)
+    curriculum_cfg = getattr(cfg, "curriculum", None)
+    curriculum_enabled = curriculum_cfg is not None and bool(getattr(curriculum_cfg, "enabled", False))
+
+    if curriculum_enabled:
+        logger.info("Curriculum learning enabled: flood→conflict")
+        curriculum_manager = CurriculumDataManager(
+            cfg,
+            flood_train_cfg    = cfg.flood_loader,
+            conflict_train_cfg = cfg.train_loader,
+            flood_val_cfg      = getattr(cfg, "flood_validation_loader", None),
+            conflict_val_cfg   = cfg.validation_loader,
+        )
+        train_loader = curriculum_manager.flood_loader
+        # Start with flood val loader; Trainer will swap at stage boundary
+        val_loader = curriculum_manager.flood_val_loader or build_loader(cfg.validation_loader, "validation")
+    else:
+        curriculum_manager = None
+        train_loader = build_loader(cfg.train_loader, "train")
+        val_loader   = build_loader(cfg.validation_loader, "validation")
+    holdout_loaders = build_holdout_loaders(cfg)
+    encoder, change_fusion, decoder, criterion, optimizer = build_model_components(cfg, device, train_loader)
 
     encoder_total = sum(p.numel() for p in encoder.parameters())
     encoder_trainable = sum(p.numel() for p in encoder.parameters() if p.requires_grad)
+    change_total = sum(p.numel() for p in change_fusion.parameters())
+    change_trainable = sum(p.numel() for p in change_fusion.parameters() if p.requires_grad)
     decoder_total = sum(p.numel() for p in decoder.parameters())
     decoder_trainable= sum(p.numel() for p in decoder.parameters() if p.requires_grad)
     
     logger.info("Built {}.".format(encoder.__class__.__module__))
     logger.info("Encoder params: total=%d | trainable=%d", encoder_total, encoder_trainable)
+    logger.info("Built {}.".format(change_fusion.__class__.__module__))
+    logger.info("Change fusion params: total=%d | trainable=%d", change_total, change_trainable)
     logger.info("Built {}.".format(decoder.__class__.__module__))
     logger.info("Decoder params: total=%d | trainable=%d", decoder_total, decoder_trainable)
 
@@ -175,24 +218,31 @@ def main(cfg: DictConfig):
         train_loader=train_loader,
         val_loader=val_loader,
         encoder=encoder,
+        change_fusion=change_fusion,
         decoder=decoder,
         criterion=criterion,
         optimizer=optimizer,
         logger=logger,
         use_wandb=cfg.use_wandb,
+        curriculum_manager=curriculum_manager,
     )
-    evaluator = Evaluator(
-        cfg=cfg,
-        exp_dir=exp_dir,
-        ckpt_dir=ckpt_dir,
-        device=device,
-        dataloader=holdout_loader,
-        logger=logger,
-        use_wandb=cfg.use_wandb,
-    )
-
     best_val_iou = trainer.train()
-    evaluator.evaluate()
+    if holdout_loaders:
+        for eval_name, holdout_loader in holdout_loaders.items():
+            evaluator = Evaluator(
+                cfg=cfg,
+                exp_dir=exp_dir,
+                ckpt_dir=ckpt_dir,
+                device=device,
+                dataloader=holdout_loader,
+                logger=logger,
+                use_wandb=cfg.use_wandb,
+                eval_name=eval_name,
+            )
+            checkpoint_prefix = "best_flood" if eval_name == "flood" else "best"
+            evaluator.evaluate(checkpoint_prefix=checkpoint_prefix)
+    else:
+        logger.info("Holdout evaluator skipped: no holdout dataloaders were configured.")
 
     if distributed:
         torch.distributed.destroy_process_group()

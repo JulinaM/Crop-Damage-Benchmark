@@ -1,0 +1,167 @@
+defaults:
+  - base
+  - _self_
+
+experiment_name: curriculum-learning
+
+curriculum:
+  enabled:         true
+  flood_epochs:    20       # was 16; best ckpt was last epoch — add 4 more to reach plateau
+  conflict_epochs: 40       # was 8; train_loss still 0.38↓ at ep24; need full convergence
+  stage2_lr:       0.00001  # 50x lower than Stage 1 — correct, keep
+
+flood_loader:
+  modalities:
+    S2L2A:
+      before: flood_data/Train/Before/S2L2A
+      after: flood_data/Train/After/S2L2A
+    S1GRD:
+      before: flood_data/Train/Before/S1GRD
+      after: flood_data/Train/After/S1GRD
+  label_dir: flood_data/Train/Labels
+  num_augmentations: 5
+  patch_size: 224
+  stride: 224
+  preload: True
+  batch_size: 4
+  shuffle: True
+  num_workers: 2
+
+flood_validation_loader:
+  modalities:
+    S2L2A:
+      before: flood_data/Validation/Before/S2L2A
+      after: flood_data/Validation/After/S2L2A
+    S1GRD:
+      before: flood_data/Validation/Before/S1GRD
+      after: flood_data/Validation/After/S1GRD
+  label_dir: flood_data/Validation/Labels
+  patch_size: 224
+  stride: 224
+  preload: False
+  batch_size: 4
+  shuffle: False
+  num_workers: 2
+
+train_loader:
+  modalities:
+    S2L2A:
+      before: Images_large/Train/Before/S2L2A
+      after: Images_large/Train/After/S2L2A
+    S1GRD:
+      before: Images_large/Train/Before/S1GRD/DESC
+      after: Images_large/Train/After/S1GRD/DESC
+  label_dir: Images_large/Train/Labels
+  num_augmentations: 5
+  patch_size: 224
+  stride: 224
+  preload: True
+  batch_size: 4
+  shuffle: True
+  num_workers: 2
+
+validation_loader: 
+  modalities:
+    S2L2A:
+      before: Images_large/Validation/Before/S2L2A
+      after: Images_large/Validation/After/S2L2A
+    S1GRD:
+      before: Images_large/Validation/Before/S1GRD/DESC
+      after: Images_large/Validation/After/S1GRD/DESC
+  label_dir: Images_large/Validation/Labels
+  patch_size: 224
+  stride: 224
+  preload: False
+  batch_size: 4
+  shuffle: False
+  num_workers: 2
+
+holdout_loader:
+  modalities:
+    S2L2A:
+      before: Images_large/Test/Before/S2L2A
+      after: Images_large/Test/After/S2L2A
+  label_dir: Images_large/Test/Labels
+  patch_size: 224
+  stride: 224
+  num_workers: 2
+
+flood_holdout_loader:
+  modalities:
+    S2L2A:
+      before: flood_data/Test/Before/S2L2A
+      after: flood_data/Test/After/S2L2A
+    S1GRD:
+      before: flood_data/Test/Before/S1GRD
+      after: flood_data/Test/After/S1GRD
+  label_dir: flood_data/Test/Labels
+  patch_size: 224
+  stride: 224
+  num_workers: 2
+
+model:
+  num_classes: 3
+  positive_class: 2
+  negative_class: 1
+  ignore_index : 0
+  learning_rate: 0.0005
+  num_epochs: 24
+  seed: 22
+
+encoder:
+  name: Terramind
+  version: terramind_v1_base
+  pretrained: true
+  finetune: false
+  modalities: ["S2L2A", "S1GRD"]
+  token_dim: 768
+  feature_indices: [3, 5, 7, 9, 11]
+  build_kwargs: {}
+
+# encoder:
+#   name: UNet
+#   modalities: ["S2L2A", "S1GRD"]
+#   build_kwargs:
+#     channels: [64, 128, 256, 512, 1024]
+
+# encoder:
+#   name: Prithvi
+#   version: prithvi_eo_v2_tiny_tl
+#   pretrained: true
+#   finetune: false
+#   modalities: ["S2L2A", "S1GRD"]
+#   token_dim: 768
+#   feature_indices: [3, 5, 7, 9, 11]
+#   build_kwargs:
+#     model_bands: ["BLUE", "GREEN", "RED", "NIR_NARROW", "SWIR_1", "SWIR_2", "VV", "VH"]
+
+decoder:
+  name: UNet
+  channels: [64, 128, 256, 512, 1024]
+
+trainer:
+  n_epochs: 60          # upper bound for non-curriculum runs only; curriculum uses flood/conflict_epochs
+  log_interval: 1
+  early_stopping_patience: 3   # consecutive epochs without val_loss improvement before stopping a stage
+  scheduler:
+    name: ReduceLROnPlateau     # ReduceLROnPlateau | CosineAnnealingLR
+    factor:   0.5               # LR multiplied by this factor on plateau
+    patience: 3                 # epochs without improvement before LR reduction
+    min_lr:   1.0e-6            # floor — LR will never go below this
+  
+use_wandb: True
+
+criterion:
+  name: ce #dice_focal, ce
+  apply_weight_loss: True
+  weight_type: inverse
+  dice_weight: 0.5
+  focal_weight: 0.5
+  focal_gamma: 2.0
+  focal_alpha: null
+  dice_smooth: 1e-6
+
+
+change:
+  method: attention_based_cross_time_fusion # concatenate_all_three, siamese_fusion, attention_based_cross_time_fusion, signed_difference_plus_absolute_difference
+  attention_heads: 4

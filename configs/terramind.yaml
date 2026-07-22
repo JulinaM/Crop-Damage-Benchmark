@@ -2,7 +2,7 @@ defaults:
   - base
   - _self_
 
-experiment_name: Unet_Encoder
+experiment_name: Terramind_Encoder
 
 train_loader: 
   modalities:
@@ -56,21 +56,21 @@ model:
   num_epochs: 8
   seed: 22
 
-# encoder:
-#   name: Terramind
-#   version: terramind_v1_base
-#   pretrained: true
-#   finetune: false
-#   modalities: ["S2L2A", "S1GRD"]
-#   token_dim: 768
-#   feature_indices: [3, 5, 7, 9, 11]
-#   build_kwargs: {}
-
 encoder:
-  name: UNet
+  name: Terramind
+  version: terramind_v1_base
+  pretrained: true
+  finetune: false
   modalities: ["S2L2A", "S1GRD"]
-  build_kwargs:
-    channels: [64, 128, 256, 512, 1024]
+  token_dim: 768
+  feature_indices: [3, 5, 7, 9, 11]
+  build_kwargs: {}
+
+# encoder:
+#   name: UNet
+#   modalities: ["S2L2A", "S1GRD"]
+#   build_kwargs:
+#     channels: [64, 128, 256, 512, 1024]
 
 # encoder:
 #   name: Prithvi
@@ -88,17 +88,22 @@ decoder:
   channels: [64, 128, 256, 512, 1024]
 
 trainer:
-  n_epochs: 3
+  n_epochs: 2
   log_interval: 1
   
 use_wandb: False
 
 criterion:
   name: ce #dice_focal, ce
-  apply_weight_loss: True
+  apply_weight_loss: False
   weight_type: inverse
   dice_weight: 0.5
   focal_weight: 0.5
   focal_gamma: 2.0
   focal_alpha: null
   dice_smooth: 1e-6
+
+
+change:
+  method: attention_based_cross_time_fusion # concatenate_all_three, siamese_fusion, attention_based_cross_time_fusion, signed_difference_plus_absolute_difference
+  attention_heads: 4

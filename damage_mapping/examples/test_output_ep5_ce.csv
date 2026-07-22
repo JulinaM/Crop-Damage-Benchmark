@@ -1,0 +1,3 @@
+,image_id,Accuracy,Precision,Recall,F1,IoU,label_file,prediction_file
+0,0,0.6178,0.1962,0.7381,0.3101,0.1835,LabelMask_B06_2019-07-28.tif,predicted_map_0_colored.tif
+1,1,0.6553,0.5031,0.6693,0.5744,0.4029,LabelMask_D02_2019-05-13.tif,predicted_map_1_colored.tif
