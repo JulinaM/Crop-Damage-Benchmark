@@ -7,7 +7,7 @@ from omegaconf import DictConfig, OmegaConf
 from torch.utils.data import DataLoader
 from torch.utils.tensorboard import SummaryWriter
 
-from damage_mapping.models.utils import calc_batch_metrics, calc_epoch_metrics, move_to_device, save_checkpoint
+from crop_damage.models.utils import calc_batch_metrics, calc_epoch_metrics, move_to_device, save_checkpoint
 
 
 class Trainer:

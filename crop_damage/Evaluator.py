@@ -9,10 +9,10 @@ from omegaconf import DictConfig
 from torch.utils.data import DataLoader
 from torch.utils.tensorboard import SummaryWriter
 
-from damage_mapping.models.change_fusion import build_change_fusion
-from damage_mapping.models.decoders import build_decoder
-from damage_mapping.models.encoders import build_encoder
-from damage_mapping.models.utils import calc_test_metrics, move_to_device, tensor_to_color_image
+from crop_damage.models.change_fusion import build_change_fusion
+from crop_damage.models.decoders import build_decoder
+from crop_damage.models.encoders import build_encoder
+from crop_damage.models.utils import calc_test_metrics, move_to_device, tensor_to_color_image
 
 
 COLOR_TABLE = {

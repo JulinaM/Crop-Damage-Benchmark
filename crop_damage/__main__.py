@@ -1,4 +1,4 @@
-from damage_mapping.main import main
+from crop_damage.main import main
 
 
 if __name__ == "__main__":

@@ -1,7 +1,7 @@
-# damage_mapping/datasets/CurriculumDataManager.py
+# crop_damage/datasets/CurriculumDataManager.py
 
 from torch.utils.data import DataLoader
-from damage_mapping.datasets.DataLoader import Train_Val_Loader
+from crop_damage.datasets.DataLoader import Train_Val_Loader
 
 
 class CurriculumDataManager:

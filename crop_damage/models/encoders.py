@@ -1,8 +1,8 @@
 import torch.nn as nn
 
-from damage_mapping.models.Encoder_UNet import UNetEncoder
-from damage_mapping.models.Encoder_Prithvi import PrithviEncoder
-from damage_mapping.models.Encoder_TerraMind import TerraMindEncoder
+from crop_damage.models.Encoder_UNet import UNetEncoder
+from crop_damage.models.Encoder_Prithvi import PrithviEncoder
+from crop_damage.models.Encoder_TerraMind import TerraMindEncoder
 
 
 def build_encoder(encoder_cfg) -> nn.Module:

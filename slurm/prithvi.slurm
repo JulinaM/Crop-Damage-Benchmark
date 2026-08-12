@@ -1,6 +1,6 @@
 #!/bin/bash
 
-#SBATCH --job-name=Terramind
+#SBATCH --job-name=Prithvi
 #SBATCH --account=PGS0413
 #SBATCH --gpus-per-node=1
 #SBATCH --nodes=1
@@ -14,16 +14,15 @@
 set -Eeuo pipefail
 
 ## USAGE::
-# Minimal (default): sbatch slurm/terramind.slurm
-# Debug infra logs: sbatch --export=DATA_SIZE=curriculum_terramind,SLURM_LOG_LEVEL=debug slurm/terramind.slurm
+# Minimal (default): sbatch slurm/prithvi.slurm
+# Debug infra logs: sbatch --export=DATA_SIZE=large,SLURM_LOG_LEVEL=debug slurm/prithvi.slurm
 
-DATA_SIZE=${DATA_SIZE:-large} #curriculum_terramind|large|small
+DATA_SIZE=${DATA_SIZE:-large} #large|small
 SLURM_LOG_LEVEL="${SLURM_LOG_LEVEL:-minimal}"  # minimal|debug
 PROJ_DIR="/users/PGS0218/julina/projects/geography/Crop-Damage-Benchmark/"
 LOG_DIR="${PROJ_DIR}/data/slurm_logs"
-LOG_STEM="terramind-${DATA_SIZE//_/-}"
+LOG_STEM="prithvi-${DATA_SIZE//_/-}" ;;
 
-mkdir -p "${LOG_DIR}"
 exec > "${LOG_DIR}/${LOG_STEM}_${SLURM_JOB_ID}.out" 2> "${LOG_DIR}/${LOG_STEM}_${SLURM_JOB_ID}.err"
 
 timestamp() { date +"%Y-%m-%d %H:%M:%S %Z"; }
@@ -60,21 +59,16 @@ export HYDRA_FULL_ERROR=1
 case $DATA_SIZE in
   large)
     CMD=(
-      python3 -u -m crop_damage 
+      python3 -u -m crop_damage "--config-name=prithvi_large"
     )
     ;;
   small)
     CMD=(
-      python3 -u -m crop_damage "--config-name=terramind_small"
-    )
-    ;;
-  curriculum_terramind)
-    CMD=(
-      python3 -u -m crop_damage "--config-name=curriculum_terramind"
+      python3 -u -m crop_damage "--config-name=prithvi_small"
     )
     ;;
   *)
-    >&2 echo "ERROR: Invalid job type '${DATA_SIZE}'. Valid options: {large|small|curriculum_terramind}"
+    >&2 echo "ERROR: Invalid job type '${DATA_SIZE}'. Valid options: {large|small}"
     exit 2
     ;;
 esac

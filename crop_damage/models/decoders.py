@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import torch.nn as nn
 
-from damage_mapping.models.Decoder_UNet2D import UNet2D
+from crop_damage.models.Decoder_UNet2D import UNet2D
 
 
 def build_decoder(decoder_cfg, feature_source: nn.Module, num_classes: int) -> nn.Module:

@@ -9,16 +9,16 @@ from hydra.core.hydra_config import HydraConfig
 from omegaconf import DictConfig, OmegaConf, open_dict
 from torch.utils.data import DataLoader
 
-from damage_mapping.Evaluator import Evaluator
-from damage_mapping.Trainer import Trainer
-from damage_mapping.datasets.CurriculumDataManager import CurriculumDataManager
-from damage_mapping.datasets.DataLoader import TestLoader, Train_Val_Loader
-from damage_mapping.logger import init_logger
-from damage_mapping.models.change_fusion import build_change_fusion
-from damage_mapping.models.decoders import build_decoder
-from damage_mapping.models.encoders import build_encoder
-from damage_mapping.utils.losses import build_criterion
-from damage_mapping.models.utils import set_seeds
+from crop_damage.Evaluator import Evaluator
+from crop_damage.Trainer import Trainer
+from crop_damage.datasets.CurriculumDataManager import CurriculumDataManager
+from crop_damage.datasets.DataLoader import TestLoader, Train_Val_Loader
+from crop_damage.logger import init_logger
+from crop_damage.models.change_fusion import build_change_fusion
+from crop_damage.models.decoders import build_decoder
+from crop_damage.models.encoders import build_encoder
+from crop_damage.utils.losses import build_criterion
+from crop_damage.models.utils import set_seeds
 
 REPO_DIR = pathlib.Path(__file__).parent.parent
 WORK_DIR = REPO_DIR / "data/input"

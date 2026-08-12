@@ -2,7 +2,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from damage_mapping.models.utils import weights
+from crop_damage.models.utils import weights
 
 
 class MulticlassCrossEntropyLoss(nn.Module):

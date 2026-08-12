@@ -12,7 +12,7 @@ import warnings
 import os
 import logging
 
-from damage_mapping.models.utils import standardize, RandomFlipPair, RandomRotationPair
+from crop_damage.models.utils import standardize, RandomFlipPair, RandomRotationPair
 
 INPUT_DIR = Path("/users/PGS0218/julina/projects/geography/damage_mapping_terramind/V2/data/input/")
 LOGGER = logging.getLogger(__name__)
