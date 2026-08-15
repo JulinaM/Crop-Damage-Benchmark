@@ -126,38 +126,39 @@ these directly at train/eval time.
 
 Splits are assigned **per event, not per chip** — every chip belonging to an event goes to exactly one
 of train/val/test, so no event straddles splits (spatial autocorrelation between chips of the same event
-would otherwise leak signal across the split boundary). Concretely, `assign_splits()`:
+would otherwise leak signal across the split boundary). `main()` runs the whole repackaging pipeline
+**once per hazard**, writing each hazard's shards/manifest/split into its own `AgDamage_v2/<Hazard>/`
+tree (never merged), so `assign_splits()` below is always called on a single hazard's chips at a time.
+Concretely, `assign_splits()`:
 
 1. Groups chips by `event_id`, and buckets each event into a severity class (`none` / `minor` / `moderate`
-   / `severe` / `catastrophic`) from the mean of its chips' damage-fraction field.
-2. Groups events into strata by `(hazard, severity_class)`.
-3. Within each stratum, assigns whole events to train/val/test with a greedy algorithm that targets the
-   configured ratios (default 70/15/15) by **chip volume**, not event count — so one very large event can't
-   dominate a split — processing larger events first (random tiebreak on a fixed seed for reproducibility).
+   / `severe` / `catastrophic`) from the mean of its chips' damage-fraction field — resolved generically
+   via `SEVERITY_FIELD_CANDIDATES` (e.g. `flooded_crop_frac` for Flood, `burned_crop_frac` for Burnt), so
+   the same bucketing logic works for both hazards.
+2. Groups events into strata keyed by `(hazard, severity_class)`. Since `assign_splits()` is now always
+   called with one hazard's chips already isolated, `hazard` is constant per call and this reduces in
+   practice to stratifying by `severity_class` alone — the key is kept for robustness in case the function
+   is ever called with a mixed-hazard chip list again.
+3. Within each stratum, assigns whole events to train/val/test with a greedy largest-first bin-packing
+   pass: events are sorted by descending chip count (random tiebreak on a fixed seed, for reproducibility),
+   then walked in that order, each one assigned in full to whichever split is currently furthest below its
+   target chip-count quota (`target - quota`, maximized). Quotas are targets over **chip volume**, not
+   event count, so one very large event can't dominate a split. This is a greedy heuristic, not a globally
+   optimal partition — per-stratum split sizes converge toward the configured ratios (default 70/15/15) but
+   won't hit them exactly, especially for small strata (e.g. a severity class with very few events for that
+   hazard), since an event's chips can't be split across quotas.
 4. Writes `split_summary.json` with an explicit **event-disjointness check**: the script hard-fails
    (`SystemExit(2)`) if any event ends up in more than one split.
 
-Current real numbers on disk (`split_summary.json`, both pass the leakage check):
-
-| Hazard | Total chips | Total events | Train | Val | Test |
-|---|---|---|---|---|---|
-| Flood | 160 | 38 | 118 chips / 26 events | 26 chips / 7 events | 16 chips / 5 events |
-| Burnt | 1000 | 315 | 700 chips / 181 events | 150 chips / 67 events | 150 chips / 67 events |
-
 **Known gaps for the team to review before treating this as final:**
-- Burnt's `severity_class` is `unknown` for all 1000 chips — `SEVERITY_FIELD_CANDIDATES` (the list of
-  JSON fields probed for a damage fraction) doesn't include a burnt-specific field, so severity
-  stratification is currently only real for Flood; Burnt splits are event-atomic and volume-balanced but
-  not severity-stratified.
-- `main()` in `repackage_agdamage.py` hard-truncates to `chips = chips[:1000]` — Burnt's chip count
-  (1000) exactly matches this cap, suggesting the current `AgDamage_v2/Burnt` was built with a
-  debug/test limit active rather than the full available Burnt chip set.
-- `discover_chips()` currently has `if hazard == "Burnt": continue`, i.e. this exact script version
-  skips Burnt entirely — the shipped `AgDamage_v2/Burnt` shards must have been produced by a different
-  invocation/version of the script; running this file as-is will not regenerate Burnt data.
 - The proximity-buffering step described in `CLAUDE.md` §4 (clustering events close in space *and* time
   into one super-group before splitting, with a spatial dead-zone between train/test) is not implemented
   in this script — only event-atomicity + severity-stratification + volume-balancing are.
+- The numbers table previously shown here (Flood 160/38, Burnt 1000/315) predates three fixes: Burnt was
+  being skipped entirely in `discover_chips()`, `main()` hard-truncated to `chips[:1000]`, and
+  `SEVERITY_FIELD_CANDIDATES` had no burnt-specific field (so Burnt severity was `unknown` for every chip).
+  All three are now fixed — re-run `repackage_agdamage.py` against the full raw dataset to regenerate
+  `AgDamage_v2/` and replace this table with current numbers before relying on it.
 
 ## Evaluation Design
 

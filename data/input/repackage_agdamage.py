@@ -1,5 +1,8 @@
 #!/usr/bin/env python3
-"""repackage_agdamage.py — test copy (identical logic to cropland deliverable)."""
+"""repackage_agdamage.py — repackages AgDamage chips (Flood and Burnt hazards) into
+sharded tar archives with a stratified, event-disjoint train/val/test split.
+Hazard-specific severity fields (e.g. flooded_crop_frac vs burned_crop_frac) are
+resolved generically via SEVERITY_FIELD_CANDIDATES so the same script covers both."""
 from __future__ import annotations
 import argparse, csv, io, json, logging, sys, tarfile
 from collections import defaultdict
@@ -13,7 +16,14 @@ MODALITY_SUFFIXES = {
     "s2_pre": "_s2_pre.tif", "s2_post": "_s2_post.tif", "label": "_label.tif",
 }
 SIDECAR_SUFFIX = ".json"
-SEVERITY_FIELD_CANDIDATES = ["flooded_crop_frac", "damaged_crop_frac", "crop_damage_frac", "flood_frac", "damage_frac", "label_frac"]
+# Checked in order, per hazard's sidecar JSON, until one is present and numeric.
+# Flood sidecars carry "flooded_crop_frac"; Burnt sidecars carry "burned_crop_frac".
+# The remaining entries are generic fallbacks shared across hazards (or future ones)
+# so a hazard folder with slightly different field naming still resolves a severity.
+SEVERITY_FIELD_CANDIDATES = [
+    "flooded_crop_frac", "burned_crop_frac", "damaged_crop_frac", "crop_damage_frac",
+    "flood_frac", "burn_frac", "damage_frac", "label_frac",
+]
 SEVERITY_BINS = [(0.01, "none"), (0.10, "minor"), (0.30, "moderate"), (0.60, "severe"), (1.01, "catastrophic")]
 logging.basicConfig(level=logging.INFO, format="%(asctime)s  %(levelname)-7s %(message)s", datefmt="%H:%M:%S")
 log = logging.getLogger("repackage")
@@ -36,7 +46,6 @@ def discover_chips(src: Path):
     hazard_dirs = [p for p in sorted(src.iterdir()) if p.is_dir() and (p / "chips").is_dir()]
     for hazard_dir in hazard_dirs:
         hazard = hazard_dir.name
-        if hazard == "Burnt": continue
         event_dirs = [p for p in sorted((hazard_dir / "chips").iterdir()) if p.is_dir()]
         log.info("[%s] scanning %d event folders", hazard, len(event_dirs))
         for ev_dir in event_dirs:
@@ -100,6 +109,53 @@ def attach_metadata(chips, src):
 
 
 def assign_splits(chips, ratios, seed):
+    """Assign each *event* (not each chip) to train/val/test.
+
+    Called once per hazard from main() — `chips` here is already filtered to a
+    single hazard (e.g. all Flood chips, or all Burnt chips), because outputs are
+    repackaged per hazard into separate out/<Hazard>/ trees (see main()). So the
+    split, its shards, and its manifest are computed independently per hazard;
+    nothing about ratios/quotas/stratum sizing below is shared across hazards.
+
+    Splits are stratified at the event level for two reasons:
+      1. Event-disjointness — every chip belonging to one event must land in the
+         same split, otherwise near-duplicate/spatially-correlated chips from the
+         same flood or fire event would leak across splits and inflate eval scores.
+         (write_manifest() re-verifies this with an explicit leakage check.)
+      2. Stratification — without it, a ratios-only random split could easily starve
+         val/test of rare severity classes (e.g. "catastrophic"), since events vary
+         a lot in both severity and chip count.
+
+    Algorithm:
+      a. Compute one severity value per event: the mean of its chips' severity
+         fractions (NaNs ignored), then bucket that mean into a severity_class via
+         classify() using the same SEVERITY_BINS as per-chip severity.
+      b. Group events into strata keyed by (hazard, event_severity_class) — e.g.
+         ("Flood", "moderate") or ("Burnt", "severe"). Since `chips` is already
+         single-hazard, `hazard` is constant within a call, so in practice this
+         only stratifies by severity_class — grouping events at severity level
+         (rather than by chip count or raw fraction) so train/val/test each get a
+         proportional mix of minor→catastrophic events instead of, say, all the
+         catastrophic ones landing in train by chance. The `hazard` key is kept in
+         the tuple (rather than dropped) so the function still works unmodified if
+         it's ever called with a mixed-hazard chip list again.
+      c. Within each stratum, run a greedy largest-first bin-packing pass:
+         - Sort events by descending chip count (ties broken by a seeded RNG draw,
+           so the result is deterministic for a given --seed but not alphabetical).
+         - Compute each split's chip-count target for the stratum from `ratios`
+           (e.g. 70/15/15) applied to the stratum's total chip count.
+         - Walk events in that order; assign each whole event to whichever split is
+           currently furthest below its target quota (target - quota, maximized).
+           This is a greedy heuristic (not a globally optimal partition) but keeps
+           per-stratum split sizes close to the requested ratios while guaranteeing
+           every chip of an event goes to the same split.
+
+    Because assignment happens per-stratum, the per-hazard dataset ratios are only
+    approximate for small strata (e.g. a severity class with very few events for
+    that hazard) — there just isn't enough granularity to hit 70/15/15 exactly
+    when an event's chips can't be split. Larger strata converge closer to the
+    target; hazards with fewer events (e.g. Burnt vs. Flood) will show more drift.
+    """
     rng = np.random.default_rng(seed); names = ("train", "val", "test")
     ev_chips = defaultdict(list)
     for c in chips: ev_chips[c.event_id].append(c)
@@ -177,6 +233,7 @@ def write_manifest(chips, out, ratios):
     log.info("Event-disjointness PASSED (%d events, %d chips)", summary["n_events"], summary["n_chips"])
 
 
+#usage: python ../repackage_agdamage.py --src AgDamage_raw --out AgDamage_v2 --samples-per-shard 32
 def main(argv=None):
     ap = argparse.ArgumentParser()
     ap.add_argument("--src", required=True, type=Path)
@@ -188,14 +245,28 @@ def main(argv=None):
     if abs(sum(args.ratios) - 1.0) > 1e-6: ap.error("--ratios must sum to 1.0")
     args.out.mkdir(parents=True, exist_ok=True)
     chips, dropped = discover_chips(args.src)
-    chips = chips[:1000]
     if not chips: log.error("no chips"); return 1
-    if dropped: pd.DataFrame(dropped).to_csv(args.out / "dropped_chips.csv", index=False)
     attach_metadata(chips, args.src)
-    ev_split = assign_splits(chips, tuple(args.ratios), args.seed)
-    for c in chips: c.split = ev_split[c.event_id]
-    write_shards(chips, args.out, args.samples_per_shard)
-    write_manifest(chips, args.out, tuple(args.ratios))
+
+    # Repackage each hazard into its own top-level output folder (out/<Hazard>/...),
+    # mirroring the AgDamage_v2 layout — hazards are never merged into one shard
+    # tree, since splits/shards/manifests are computed and consumed per hazard.
+    by_hazard = defaultdict(list)
+    for c in chips: by_hazard[c.hazard].append(c)
+    dropped_by_hazard = defaultdict(list)
+    for d in dropped: dropped_by_hazard[d["hazard"]].append(d)
+
+    for hazard, hazard_chips in sorted(by_hazard.items()):
+        hazard_out = args.out / hazard
+        hazard_out.mkdir(parents=True, exist_ok=True)
+        log.info("=== [%s] %d chips ===", hazard, len(hazard_chips))
+        if dropped_by_hazard.get(hazard):
+            pd.DataFrame(dropped_by_hazard[hazard]).to_csv(hazard_out / "dropped_chips.csv", index=False)
+        ev_split = assign_splits(hazard_chips, tuple(args.ratios), args.seed)
+        for c in hazard_chips: c.split = ev_split[c.event_id]
+        write_shards(hazard_chips, hazard_out, args.samples_per_shard)
+        write_manifest(hazard_chips, hazard_out, tuple(args.ratios))
+
     log.info("DONE -> %s", args.out.resolve())
     return 0
 
