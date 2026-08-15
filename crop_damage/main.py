@@ -12,8 +12,6 @@ from torch.utils.data import DataLoader
 from crop_damage.Evaluator import Evaluator
 from crop_damage.Trainer import Trainer
 from crop_damage.datasets.AgDamageShardDataset import AgDamageShardDataset
-from crop_damage.datasets.CurriculumDataManager import CurriculumDataManager
-from crop_damage.datasets.DataLoader import TestLoader, Train_Val_Loader
 from crop_damage.logger import init_logger
 from crop_damage.models.change_fusion import build_change_fusion
 from crop_damage.models.decoders import build_decoder
@@ -47,16 +45,10 @@ def init_wandb_run(cfg: DictConfig, exp_dir: Path, exp_name: str):
 
     run = wandb.init(**wandb_settings)
     wandb.define_metric("train/global_step")
-    wandb.define_metric("train/*",          step_metric="train/global_step")
-    wandb.define_metric("train/flood/*",    step_metric="train/global_step")
-    wandb.define_metric("train/conflict/*", step_metric="train/global_step")
+    wandb.define_metric("train/*", step_metric="train/global_step")
     wandb.define_metric("val/epoch")
-    wandb.define_metric("val/*",            step_metric="val/epoch")
-    wandb.define_metric("val/flood/*",      step_metric="val/epoch")
-    wandb.define_metric("val/conflict/*",   step_metric="val/epoch")
-    wandb.define_metric("best/*",           step_metric="val/epoch")
-    wandb.define_metric("best/flood/*",     step_metric="val/epoch")
-    wandb.define_metric("best/conflict/*",  step_metric="val/epoch")
+    wandb.define_metric("val/*",   step_metric="val/epoch")
+    wandb.define_metric("best/*",  step_metric="val/epoch")
     return run
 
 
@@ -97,25 +89,7 @@ def build_agdamage_dataset(loader_cfg: DictConfig, split: str, mode: str) -> AgD
 
 
 def build_loader(loader_cfg: DictConfig, split: str) -> DataLoader:
-    if getattr(loader_cfg, "dataset", "legacy") == "agdamage_shard":
-        dataset = build_agdamage_dataset(loader_cfg, _AGDAMAGE_SPLIT_MAP.get(split, split), mode="train_val")
-        return DataLoader(
-            dataset,
-            batch_size=loader_cfg.batch_size,
-            shuffle=loader_cfg.shuffle,
-            num_workers=getattr(loader_cfg, "num_workers", 0),
-        )
-
-    modalities = {name: (paths.before, paths.after) for name, paths in loader_cfg.modalities.items()}
-    dataset = Train_Val_Loader(
-        modalities=modalities,
-        label_dir=loader_cfg.label_dir,
-        split=split,
-        num_augmentations=getattr(loader_cfg, "num_augmentations", 0),
-        patch_size=loader_cfg.patch_size,
-        stride=loader_cfg.stride,
-        preload=loader_cfg.preload,
-    )
+    dataset = build_agdamage_dataset(loader_cfg, _AGDAMAGE_SPLIT_MAP.get(split, split), mode="train_val")
     return DataLoader(
         dataset,
         batch_size=loader_cfg.batch_size,
@@ -128,21 +102,7 @@ def build_holdout_loader(loader_cfg: DictConfig | None) -> DataLoader | None:
     if loader_cfg is None:
         return None
 
-    if getattr(loader_cfg, "dataset", "legacy") == "agdamage_shard":
-        dataset = build_agdamage_dataset(loader_cfg, getattr(loader_cfg, "split", "test"), mode="test")
-        return DataLoader(
-            dataset,
-            batch_size=None,
-            num_workers=getattr(loader_cfg, "num_workers", 0),
-        )
-
-    modalities = {name: (paths.before, paths.after) for name, paths in loader_cfg.modalities.items()}
-    dataset = TestLoader(
-        modalities=modalities,
-        label_dir=loader_cfg.label_dir,
-        patch_size=loader_cfg.patch_size,
-        stride=loader_cfg.stride,
-    )
+    dataset = build_agdamage_dataset(loader_cfg, getattr(loader_cfg, "split", "test"), mode="test")
     return DataLoader(
         dataset,
         batch_size=None,
@@ -161,17 +121,6 @@ def build_holdout_loaders(cfg: DictConfig) -> dict[str, DataLoader]:
                 holdout_loaders[eval_name] = loader
         return holdout_loaders
 
-    # Legacy fallback: fixed flood/conflict pair, used by curriculum_terramind.yaml
-    # which doesn't define eval_loaders.
-    for eval_name, loader_key in (
-        ("conflict", "holdout_loader"),
-        ("flood", "flood_holdout_loader"),
-    ):
-        loader = build_holdout_loader(cfg.get(loader_key))
-        if loader is not None:
-            holdout_loaders[eval_name] = loader
-    return holdout_loaders
-
 
 def build_model_components(cfg: DictConfig, device: torch.device, train_loader: DataLoader):
     criterion = build_criterion(
@@ -182,7 +131,8 @@ def build_model_components(cfg: DictConfig, device: torch.device, train_loader: 
         device=device,
     )
 
-    if str(getattr(cfg.encoder, "name", "Terramind")).strip().lower() == "unet":
+    encoder_name = str(getattr(cfg.encoder, "name", "Terramind")).strip().lower()
+    if encoder_name == "unet":
         single_input = next(iter(train_loader))[0]
         modality_channels = {name: int(value.shape[1]) for name, value in single_input['before'].items()}
         print('modality_channels: ', modality_channels)
@@ -197,7 +147,6 @@ def build_model_components(cfg: DictConfig, device: torch.device, train_loader: 
     change_fusion.to(device)
     decoder.to(device)
 
-    encoder_name = str(getattr(cfg.encoder, "name", "Terramind")).strip().lower()
     optimized_params = list(change_fusion.parameters()) + list(decoder.parameters())
     if encoder_name == "unet" or bool(getattr(cfg.encoder, "finetune", False)):
         optimizer = optim.Adam(list(encoder.parameters()) + optimized_params, lr=cfg.model.learning_rate)
@@ -207,7 +156,7 @@ def build_model_components(cfg: DictConfig, device: torch.device, train_loader: 
     return encoder, change_fusion, decoder, criterion, optimizer
 
 
-@hydra.main(version_base="1.2", config_path=str(CONFIG_DIR), config_name="terramind")
+@hydra.main(version_base="1.2", config_path=str(CONFIG_DIR), config_name="segmentation/terramind_flood")
 def main(cfg: DictConfig):
     set_seeds(cfg.model.seed)
 
@@ -239,25 +188,8 @@ def main(cfg: DictConfig):
     logger.info("Device name: %s", device)
     logger.info("The experiment is stored in %s", exp_dir)
 
-    curriculum_cfg = getattr(cfg, "curriculum", None)
-    curriculum_enabled = curriculum_cfg is not None and bool(getattr(curriculum_cfg, "enabled", False))
-
-    if curriculum_enabled:
-        logger.info("Curriculum learning enabled: flood→conflict")
-        curriculum_manager = CurriculumDataManager(
-            cfg,
-            flood_train_cfg    = cfg.flood_loader,
-            conflict_train_cfg = cfg.train_loader,
-            flood_val_cfg      = getattr(cfg, "flood_validation_loader", None),
-            conflict_val_cfg   = cfg.validation_loader,
-        )
-        train_loader = curriculum_manager.flood_loader
-        # Start with flood val loader; Trainer will swap at stage boundary
-        val_loader = curriculum_manager.flood_val_loader or build_loader(cfg.validation_loader, "validation")
-    else:
-        curriculum_manager = None
-        train_loader = build_loader(cfg.train_loader, "train")
-        val_loader   = build_loader(cfg.validation_loader, "validation")
+    train_loader = build_loader(cfg.train_loader, "train")
+    val_loader   = build_loader(cfg.validation_loader, "validation")
     holdout_loaders = build_holdout_loaders(cfg)
     encoder, change_fusion, decoder, criterion, optimizer = build_model_components(cfg, device, train_loader)
 
@@ -289,7 +221,6 @@ def main(cfg: DictConfig):
         optimizer=optimizer,
         logger=logger,
         use_wandb=cfg.use_wandb,
-        curriculum_manager=curriculum_manager,
     )
     best_val_iou = trainer.train()
     if holdout_loaders:
@@ -304,8 +235,7 @@ def main(cfg: DictConfig):
                 use_wandb=cfg.use_wandb,
                 eval_name=eval_name,
             )
-            checkpoint_prefix = "best_flood" if eval_name == "flood" else "best"
-            evaluator.evaluate(checkpoint_prefix=checkpoint_prefix)
+            evaluator.evaluate(checkpoint_prefix="best")
     else:
         logger.info("Holdout evaluator skipped: no holdout dataloaders were configured.")
 

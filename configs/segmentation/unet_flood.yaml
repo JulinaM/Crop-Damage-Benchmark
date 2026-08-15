@@ -1,9 +1,14 @@
+# @package _global_
 defaults:
-  - base
+  - /base
   - _self_
 
+# Non-FM baseline: same task/data/protocol as terramind_flood.yaml, encoder
+# swapped for a from-scratch U-Net. Per CLAUDE.md sec.2/7: run this before
+# treating any foundation-model number as meaningful -- it's the floor that
+# tells you whether a foundation model is actually adding value on this hazard.
 task: Segmentation
-experiment_name: ${task}_burnt
+experiment_name: ${task}_unet_flood
 
 # Label class_remap and model.{ignore_index,negative_class,positive_class} are
 # tied together -- see crop_damage/datasets/AgDamageShardDataset.py header for
@@ -11,7 +16,7 @@ experiment_name: ${task}_burnt
 train_loader:
   dataset: agdamage_shard
   data_root: data/input/J_AgDamage/AgDamage_v2
-  hazards: [Burnt]
+  hazards: [Flood]
   modalities:
     S2L2A: {}
     S1GRD: {}
@@ -19,7 +24,7 @@ train_loader:
   label_nodata: 255
   class_remap: {1: 2, 2: 1, 3: 0, 4: 0}
   num_augmentations: 5
-  patch_size: 512
+  patch_size: 224
   preload: False
   batch_size: 4
   shuffle: True
@@ -28,14 +33,14 @@ train_loader:
 validation_loader:
   dataset: agdamage_shard
   data_root: data/input/J_AgDamage/AgDamage_v2
-  hazards: [Burnt]
+  hazards: [Flood]
   modalities:
     S2L2A: {}
     S1GRD: {}
   label_band: 1
   label_nodata: 255
   class_remap: {1: 2, 2: 1, 3: 0, 4: 0}
-  patch_size: 512
+  patch_size: 224
   preload: False
   batch_size: 4
   shuffle: False
@@ -49,19 +54,6 @@ eval_loaders:
   in_distribution:
     dataset: agdamage_shard
     data_root: data/input/J_AgDamage/AgDamage_v2
-    hazards: [Burnt]
-    split: test
-    modalities:
-      S2L2A: {}
-      S1GRD: {}
-    label_band: 1
-    label_nodata: 255
-    class_remap: {1: 2, 2: 1, 3: 0, 4: 0}
-    patch_size: 512
-    num_workers: 2
-  ood_flood:
-    dataset: agdamage_shard
-    data_root: data/input/J_AgDamage/AgDamage_v2
     hazards: [Flood]
     split: test
     modalities:
@@ -70,7 +62,20 @@ eval_loaders:
     label_band: 1
     label_nodata: 255
     class_remap: {1: 2, 2: 1, 3: 0, 4: 0}
-    patch_size: 512
+    patch_size: 224
+    num_workers: 2
+  loho_burnt:
+    dataset: agdamage_shard
+    data_root: data/input/J_AgDamage/AgDamage_v2
+    hazards: [Burnt]
+    split: test
+    modalities:
+      S2L2A: {}
+      S1GRD: {}
+    label_band: 1
+    label_nodata: 255
+    class_remap: {1: 2, 2: 1, 3: 0, 4: 0}
+    patch_size: 224
     num_workers: 2
 
 model:
@@ -83,14 +88,11 @@ model:
   seed: 22
 
 encoder:
-  name: Terramind
-  version: terramind_v1_base
-  pretrained: true
-  finetune: false
+  name: UNet
   modalities: ["S2L2A", "S1GRD"]
-  token_dim: 768
-  feature_indices: [3, 5, 7, 9, 11]
-  build_kwargs: {}
+  finetune: true  # trained from scratch -- always in the optimizer regardless of this flag, kept true for clarity
+  build_kwargs:
+    channels: [64, 128, 256, 512, 1024]
 
 decoder:
   name: UNet

@@ -17,7 +17,7 @@ set -Eeuo pipefail
 # Minimal (default): sbatch slurm/prithvi.slurm
 # Debug infra logs: sbatch --export=DATA_SIZE=large,SLURM_LOG_LEVEL=debug slurm/prithvi.slurm
 
-DATA_SIZE=${DATA_SIZE:-large} #large|small
+DATA_SIZE=${DATA_SIZE:-large} #large|test
 SLURM_LOG_LEVEL="${SLURM_LOG_LEVEL:-minimal}"  # minimal|debug
 PROJ_DIR="/users/PGS0218/julina/projects/geography/Crop-Damage-Benchmark/"
 LOG_DIR="${PROJ_DIR}/data/slurm_logs"
@@ -62,13 +62,13 @@ case $DATA_SIZE in
       python3 -u -m crop_damage "--config-name=prithvi_large"
     )
     ;;
-  small)
+  test)
     CMD=(
-      python3 -u -m crop_damage "--config-name=prithvi_small"
+      python3 -u -m crop_damage "--config-name=prithvi_test"
     )
     ;;
   *)
-    >&2 echo "ERROR: Invalid job type '${DATA_SIZE}'. Valid options: {large|small}"
+    >&2 echo "ERROR: Invalid job type '${DATA_SIZE}'. Valid options: {large|test}"
     exit 2
     ;;
 esac

@@ -168,8 +168,6 @@ def save_checkpoint(encoder, change_fusion, decoder, optimizer, epoch, val_loss,
                     save_dir="checkpoints", prefix="best"):
     """
     Save model checkpoint and config, deleting the previous best for this prefix.
-    Use distinct prefixes per curriculum stage ("best_flood" vs "best") so Stage 1
-    checkpoints are not deleted when Stage 2 saves a new best.
     """
     os.makedirs(save_dir, exist_ok=True)
 
@@ -197,48 +195,66 @@ def save_checkpoint(encoder, change_fusion, decoder, optimizer, epoch, val_loss,
     return checkpoint_path
 
 
+def calc_confusion_counts(pred, true, ignore_index=0, positive_class=2, negative_class=1):
+    """
+    Raw TP/FP/FN/TN pixel counts for one prediction/label tile pair.
+    Shared building block for per-chip, per-event (pooled), and micro
+    (globally pooled) metrics -- pooling raw counts before computing ratios
+    is what makes those three consistent with each other.
+    """
+    pred = pred.long()
+    true = true.long()
+
+    if ignore_index is not None:
+        mask = (true != ignore_index)
+        pred = pred[mask]
+        true = true[mask]
+
+    TP = ((pred == positive_class) & (true == positive_class)).sum().item()
+    TN = ((pred == negative_class) & (true == negative_class)).sum().item()
+    FP = ((pred == positive_class) & (true == negative_class)).sum().item()
+    FN = ((pred == negative_class) & (true == positive_class)).sum().item()
+    return TP, FP, FN, TN
+
+
 def calc_test_metrics(image_tiles_pred, image_tiles_true, ignore_index=0, positive_class=2, negative_class=1):
     """
     calculate metrics of interest for our test runs only
     """
-    
-    # To avoid div/0 issue
-    eps = 1e-6
-
     all_results = {}
 
     # run over each image tile (true & pred)
     for idx in image_tiles_pred.keys():
-        pred = image_tiles_pred[idx].long()
-        true = image_tiles_true[idx].long()
-
-        # Apply ignore mask (background)
-        if ignore_index is not None:
-            mask = (true != ignore_index)
-            pred = pred[mask]
-            true = true[mask]
-
-        TP = ((pred == positive_class) & (true == positive_class)).sum().item()
-        TN = ((pred == negative_class) & (true == negative_class)).sum().item()
-        FP = ((pred == positive_class) & (true == negative_class)).sum().item()
-        FN = ((pred == negative_class) & (true == positive_class)).sum().item()
-
-        accuracy = (TP + TN) / (TP + FP + TN + FN + eps)
-        precision = TP / (TP + FP + eps)
-        recall = TP / (TP + FN + eps)
-        f1 = (2 * precision * recall) / (precision + recall + eps)
-        iou = TP / (TP + FP + FN + eps)
-
-        # Return all desired results
-        all_results[idx] = {
-            "Accuracy": accuracy,
-            "Precision": precision,
-            "Recall": recall,
-            "F1": f1,
-            "IoU": iou
-        }
+        TP, FP, FN, TN = calc_confusion_counts(
+            image_tiles_pred[idx], image_tiles_true[idx],
+            ignore_index=ignore_index, positive_class=positive_class, negative_class=negative_class,
+        )
+        all_results[idx] = calc_epoch_metrics(TP, FP, FN, TN)
 
     return all_results
+
+
+def bootstrap_ci(values, n_boot=2000, ci=0.95, seed=None):
+    """
+    Percentile bootstrap CI over a list of per-group (e.g. per-event) metric
+    values -- resamples the groups themselves (not pixels), which is the
+    right unit given each event's metric is already a single pooled number.
+    Returns (low, high). With <2 values, returns (nan, nan) since a CI over
+    a single observation is meaningless.
+    """
+    values = np.asarray(values, dtype=np.float64)
+    if len(values) < 2:
+        return float("nan"), float("nan")
+
+    rng = np.random.default_rng(seed)
+    boot_means = np.empty(n_boot, dtype=np.float64)
+    for b in range(n_boot):
+        sample = rng.choice(values, size=len(values), replace=True)
+        boot_means[b] = sample.mean()
+
+    alpha = (1.0 - ci) / 2.0
+    low, high = np.quantile(boot_means, [alpha, 1.0 - alpha])
+    return float(low), float(high)
 
 
 def tensor_to_color_image(tensor, num_classes=3):

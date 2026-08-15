@@ -1,3 +1,4 @@
+import json
 import logging
 from collections import defaultdict
 from pathlib import Path
@@ -12,7 +13,16 @@ from torch.utils.tensorboard import SummaryWriter
 from crop_damage.models.change_fusion import build_change_fusion
 from crop_damage.models.decoders import build_decoder
 from crop_damage.models.encoders import build_encoder
-from crop_damage.models.utils import calc_test_metrics, move_to_device, tensor_to_color_image
+from crop_damage.models.utils import (
+    bootstrap_ci,
+    calc_confusion_counts,
+    calc_epoch_metrics,
+    calc_test_metrics,
+    move_to_device,
+    tensor_to_color_image,
+)
+
+METRIC_NAMES = ("Accuracy", "Precision", "Recall", "F1", "IoU")
 
 
 COLOR_TABLE = {
@@ -58,7 +68,7 @@ class Evaluator:
         self,
         checkpoint_path: str | Path | None = None,
         checkpoint_prefix: str = "best",
-    ) -> dict[int, dict[str, float]] | None:
+    ) -> dict | None:
         if not self.is_configured():
             self.logger.info("%s evaluator skipped: no dataloader was provided.", self.eval_name)
             self.writer.close()
@@ -85,7 +95,7 @@ class Evaluator:
         self._mask_background_predictions(image_tiles_pred, image_tiles_true)
 
         geotiff_dir = self._save_geotiffs(image_tiles_pred, metas)
-        metrics = self._save_metrics_and_visualizations(image_tiles_pred, image_tiles_true)
+        metrics = self._save_metrics_and_visualizations(image_tiles_pred, image_tiles_true, checkpoint_path)
         self.writer.close()
 
         self.logger.info("Saved %s GeoTIFFs to %s", self.eval_name, geotiff_dir)
@@ -213,25 +223,110 @@ class Evaluator:
 
         return geotiff_dir
 
+    def _event_id_for_chip(self, idx: int) -> str:
+        # Chips whose dataset doesn't expose event_id_for_chip (or that lack
+        # event grouping) each become their own singleton "event", so macro
+        # metrics degenerate gracefully to per-chip instead of crashing.
+        dataset = getattr(self.dataloader, "dataset", None)
+        get_event_id = getattr(dataset, "event_id_for_chip", None)
+        return get_event_id(idx) if get_event_id is not None else str(idx)
+
+    def _macro_and_micro_metrics(
+        self,
+        image_tiles_pred: dict[int, torch.Tensor],
+        image_tiles_true: dict[int, torch.Tensor],
+    ) -> dict:
+        """
+        Event-grouped macro metrics (+bootstrap CI) and globally-pooled micro
+        metrics, per CLAUDE.md's evaluation protocol: macro-by-event is the
+        headline generalization number, micro is the finer-grained pixel-pooled
+        complement, and the CI flags noise when the event count is small.
+        """
+        ignore_index = self.cfg.model.ignore_index
+        positive_class = self.cfg.model.positive_class
+        negative_class = self.cfg.model.negative_class
+
+        chip_counts = {
+            idx: calc_confusion_counts(
+                image_tiles_pred[idx], image_tiles_true[idx],
+                ignore_index=ignore_index, positive_class=positive_class, negative_class=negative_class,
+            )
+            for idx in image_tiles_pred
+        }
+
+        event_counts: dict[str, list[int]] = defaultdict(lambda: [0, 0, 0, 0])
+        for idx, counts in chip_counts.items():
+            acc = event_counts[self._event_id_for_chip(idx)]
+            for i in range(4):
+                acc[i] += counts[i]
+
+        per_event_metrics = {
+            event_id: calc_epoch_metrics(*counts) for event_id, counts in event_counts.items()
+        }
+
+        macro, macro_ci = {}, {}
+        for name in METRIC_NAMES:
+            values = [m[name] for m in per_event_metrics.values()]
+            macro[name] = float(np.mean(values)) if values else float("nan")
+            macro_ci[name] = bootstrap_ci(values)
+
+        micro_counts = [sum(c[i] for c in chip_counts.values()) for i in range(4)]
+        micro = calc_epoch_metrics(*micro_counts)
+
+        return {
+            "per_event": per_event_metrics,
+            "macro": macro,
+            "macro_ci": macro_ci,
+            "micro": micro,
+            "n_events": len(event_counts),
+            "n_chips": len(chip_counts),
+        }
+
     def _save_metrics_and_visualizations(
         self,
         image_tiles_pred: dict[int, torch.Tensor],
         image_tiles_true: dict[int, torch.Tensor],
-    ) -> dict[int, dict[str, float]]:
-        metrics = calc_test_metrics(
+        checkpoint_path: Path,
+    ) -> dict:
+        per_chip = calc_test_metrics(
             image_tiles_pred,
             image_tiles_true,
             ignore_index=self.cfg.model.ignore_index,
             positive_class=self.cfg.model.positive_class,
             negative_class=self.cfg.model.negative_class,
         )
+        agg = self._macro_and_micro_metrics(image_tiles_pred, image_tiles_true)
+
         metrics_path = self.output_dir / "metrics.txt"
         with metrics_path.open("w") as handle:
-            for idx, image_metrics in metrics.items():
-                handle.write(f"\nImage {idx} metrics:\n")
+            handle.write(
+                f"Summary: {agg['n_chips']} chip(s) across {agg['n_events']} event(s)\n"
+            )
+            handle.write("\nMacro (mean over events, [95% bootstrap CI]):\n")
+            for name in METRIC_NAMES:
+                low, high = agg["macro_ci"][name]
+                handle.write(f"  {name}: {agg['macro'][name]:.4f}  [{low:.4f}, {high:.4f}]\n")
+                self.writer.add_scalar(f"{self.eval_name}/macro/{name}", agg["macro"][name], global_step=0)
+
+            handle.write("\nMicro (pooled over all chips/pixels):\n")
+            for name in METRIC_NAMES:
+                handle.write(f"  {name}: {agg['micro'][name]:.4f}\n")
+                self.writer.add_scalar(f"{self.eval_name}/micro/{name}", agg["micro"][name], global_step=0)
+
+            handle.write("\nPer-event metrics:\n")
+            for event_id, event_metrics in agg["per_event"].items():
+                handle.write(f"\n  Event {event_id}:\n")
+                for key, value in event_metrics.items():
+                    handle.write(f"    {key}: {value:.4f}\n")
+
+            handle.write("\nPer-chip metrics:\n")
+            for idx, image_metrics in per_chip.items():
+                handle.write(f"\n  Chip {idx}:\n")
                 for key, value in image_metrics.items():
-                    handle.write(f"  {key}: {value:.4f}\n")
-                    self.writer.add_scalar(f"{self.eval_name}/{key}", value, global_step=idx)
+                    handle.write(f"    {key}: {value:.4f}\n")
+                    self.writer.add_scalar(f"{self.eval_name}/per_chip/{key}", value, global_step=idx)
+
+        self._save_metrics_json(agg, checkpoint_path)
 
         for idx in list(image_tiles_pred.keys())[:3]:
             pred_rgb = tensor_to_color_image(image_tiles_pred[idx], num_classes=self.cfg.model.num_classes)
@@ -239,20 +334,65 @@ class Evaluator:
             self.writer.add_image(f"{self.eval_name}/comparison_{idx}", torch.cat((true_rgb, pred_rgb), dim=2))
 
         self.logger.info("Saved %s metrics to %s", self.eval_name, metrics_path)
-        self._write_wandb(metrics)
-        return metrics
+        self.logger.info(
+            "%s macro IoU=%.4f [%.4f, %.4f] | macro F1=%.4f [%.4f, %.4f] | micro IoU=%.4f | %d event(s), %d chip(s)",
+            self.eval_name,
+            agg["macro"]["IoU"], *agg["macro_ci"]["IoU"],
+            agg["macro"]["F1"], *agg["macro_ci"]["F1"],
+            agg["micro"]["IoU"],
+            agg["n_events"], agg["n_chips"],
+        )
 
-    def _write_wandb(self, metrics: dict[int, dict[str, float]]) -> None:
-        if not self.use_wandb or not metrics:
+        result = {"per_chip": per_chip, **agg}
+        self._write_wandb(result)
+        return result
+
+    def _save_metrics_json(self, agg: dict, checkpoint_path: Path) -> None:
+        """
+        Machine-readable companion to metrics.txt: {experiment}/{eval_name}/metrics.json.
+        Lets a results-collection script glob across many experiment dirs and
+        build comparison tables (e.g. in-distribution vs LOHO IoU) without
+        re-parsing the human-readable text report or the training config.
+        """
+        payload = {
+            "experiment_name": str(getattr(self.cfg, "experiment_name", None)),
+            "eval_name": self.eval_name,
+            "task": str(getattr(self.cfg, "task", None)),
+            "encoder": str(getattr(self.cfg.encoder, "name", None)),
+            "encoder_finetune": bool(getattr(self.cfg.encoder, "finetune", False)),
+            "train_hazards": list(getattr(self.cfg.train_loader, "hazards", []) or []),
+            "checkpoint": str(checkpoint_path),
+            "n_events": agg["n_events"],
+            "n_chips": agg["n_chips"],
+            "macro": agg["macro"],
+            "macro_ci": {name: list(ci) for name, ci in agg["macro_ci"].items()},
+            "micro": agg["micro"],
+            "per_event": agg["per_event"],
+        }
+        json_path = self.output_dir / "metrics.json"
+        with json_path.open("w") as handle:
+            json.dump(payload, handle, indent=2)
+
+    def _write_wandb(self, result: dict) -> None:
+        if not self.use_wandb or not result:
             return
 
-        metric_names = next(iter(metrics.values())).keys()
         summary = {}
-        for name in metric_names:
-            values = [image_metrics[name] for image_metrics in metrics.values()]
-            summary[f"{self.eval_name}/{name}_mean"] = float(np.mean(values))
-            summary[f"{self.eval_name}/{name}_min"] = float(np.min(values))
-            summary[f"{self.eval_name}/{name}_max"] = float(np.max(values))
+        for name in METRIC_NAMES:
+            summary[f"{self.eval_name}/macro/{name}"] = result["macro"][name]
+            low, high = result["macro_ci"][name]
+            summary[f"{self.eval_name}/macro/{name}_ci_low"] = low
+            summary[f"{self.eval_name}/macro/{name}_ci_high"] = high
+            summary[f"{self.eval_name}/micro/{name}"] = result["micro"][name]
+
+        per_chip = result["per_chip"]
+        if per_chip:
+            metric_names = next(iter(per_chip.values())).keys()
+            for name in metric_names:
+                values = [image_metrics[name] for image_metrics in per_chip.values()]
+                summary[f"{self.eval_name}/per_chip/{name}_mean"] = float(np.mean(values))
+                summary[f"{self.eval_name}/per_chip/{name}_min"] = float(np.min(values))
+                summary[f"{self.eval_name}/per_chip/{name}_max"] = float(np.max(values))
 
         self.wandb.summary.update(summary)
 

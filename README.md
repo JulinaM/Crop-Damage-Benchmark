@@ -14,10 +14,14 @@
 crop_damage/            # Core training / inference code (trainer, models, loaders)
 
 configs/                # Experiment and model configs
+Task A: Segmentation
+Task B: Change Detection
 
 slurm/                  # SLURM launch scripts for cluster training
 
 dataset_construction/   # Pipeline for building the benchmark dataset
+
+data/                   # input and logs from slurm and experiments
 
 ```
 
@@ -41,7 +45,7 @@ pip install -r requirements.txt
 
 # small experiment on 2 GPUs
 
-torchrun --nproc_per_node=2 crop_damage/trainer.py -m ++train_loader=small
+torchrun --nproc_per_node=2 crop_damage/trainer.py -m ++train_loader=test
 
  
 
@@ -49,26 +53,149 @@ torchrun --nproc_per_node=2 crop_damage/trainer.py -m ++train_loader=small
 
 sbatch slurm/terramind.slurm
 
+sbatch --export=DATA_SIZE=test,SLURM_LOG_LEVEL=debug slurm/terramind.slurm
+
 ```
 
  
 
-SLURM options: `DATA_SIZE=large|small` (default `large`), `SLURM_LOG_LEVEL=debug`.
+SLURM options: `DATA_SIZE=large|test` (default `large`), `SLURM_LOG_LEVEL=debug`.
 
  
 
 ## Dataset
 
- 
+*(To do)*
 
 The benchmark dataset is built from raw Sentinel-1/Sentinel-2 scenes and split into
+Train/Validation/Test sets stratified by hazard and agroecological context.
+Full dataset: **[huggingface.co/datasets/eadrah/AgDamage_Benchmark](https://huggingface.co/datasets/eadrah/AgDamage_Benchmark)**.
 
-Train/Validation/Test sets stratified by hazard and agroecological context. The link to full dataset is `https://huggingface.co/datasets/eadrah/AgDamage_Benchmark`
+Each sample is a **chip**: a co-registered 512x512 tile at 10m resolution carrying pre/post-event
+Sentinel-1 SAR + Sentinel-2 optical imagery and a 3-class damage label (unaffected / non-crop / damaged),
+built by pairing the observed disaster extent (flood inundation, burn scar, ...) against cropland masks
+(USDA CDL / ESA WorldCover). Two hazards are currently populated: **Flood** and **Burnt**.
 
+See [`dataset_construction/`](dataset_construction/) for the raw-data collection pipeline, and
+[`data/input/repackage_agdamage.py`](data/input/repackage_agdamage.py) for the repackaging script
+described below.
 
-See [`dataset_construction/`](dataset_construction/) for the pipeline.
+### Raw layout (`AgDamage_raw`) and metadata
 
- 
+The as-downloaded HF dataset is organized one folder per disaster event:
+
+```
+AgDamage_raw/<Hazard>/
+├── events_master.csv        # one row per event: bbox, date range, continent/country,
+│                             # source (DFO/groundsource/...), tier, corroboration count,
+│                             # gfm_flood_km2, n_chips, batch, ...
+├── qc_chips.csv              # one row per chip: clear_frac, nodata_frac, edge_cc,
+│                             # is_partial/is_white/is_corrupt/is_cloudy/is_speckle flags, ...
+└── chips/<event_id>/
+    ├── <chip_id>_label.tif
+    ├── <chip_id>_s2_pre.tif / _s2_post.tif
+    ├── <chip_id>_s1_pre.tif / _s1_post.tif
+    └── <chip_id>.json        # per-chip sidecar: event provenance (source, tier, confirming
+                               # agencies), event_date_start/end, crs, bbox (min/max lon/lat),
+                               # cropland_frac, flooded_crop_frac / excluded_crop_frac,
+                               # per-image acquisition date + clear_frac for each of the 4 rasters
+```
+
+### Repackaged distribution format (`AgDamage_v2` — used for training)
+
+The raw layout is tens of thousands of loose files, which trips the HF API's rate limit.
+`repackage_agdamage.py` converts it into **WebDataset shards + a Parquet manifest**:
+
+```
+AgDamage_v2/<Hazard>/
+├── manifest.parquet / manifest.csv   # one row per chip: chip_id, event_id, hazard, split,
+│                                      #   severity, severity_class, shard, + any lat/lon/date/crs
+│                                      #   fields present in the chip's sidecar
+├── split_summary.json                # per-split chip/event counts, severity_class histogram,
+│                                      #   and an explicit event-leakage check (see below)
+├── dropped_chips.csv                 # chips missing one of the 5 required rasters, with reason
+└── shards/{train,val,test}/<split>-NNNNNN.tar
+```
+
+Inside a shard, one chip = 6 tar members sharing a key: `<chip_id>.{s1_pre,s1_post,s2_pre,s2_post,label}.tif`
++ `<chip_id>.json` (the manifest row, duplicated per-chip). `AgDamageShardDataset` (see
+[`crop_damage/datasets/AgDamageShardDataset.py`](crop_damage/datasets/AgDamageShardDataset.py)) reads
+these directly at train/eval time.
+
+### Split & stratification logic
+
+Splits are assigned **per event, not per chip** — every chip belonging to an event goes to exactly one
+of train/val/test, so no event straddles splits (spatial autocorrelation between chips of the same event
+would otherwise leak signal across the split boundary). Concretely, `assign_splits()`:
+
+1. Groups chips by `event_id`, and buckets each event into a severity class (`none` / `minor` / `moderate`
+   / `severe` / `catastrophic`) from the mean of its chips' damage-fraction field.
+2. Groups events into strata by `(hazard, severity_class)`.
+3. Within each stratum, assigns whole events to train/val/test with a greedy algorithm that targets the
+   configured ratios (default 70/15/15) by **chip volume**, not event count — so one very large event can't
+   dominate a split — processing larger events first (random tiebreak on a fixed seed for reproducibility).
+4. Writes `split_summary.json` with an explicit **event-disjointness check**: the script hard-fails
+   (`SystemExit(2)`) if any event ends up in more than one split.
+
+Current real numbers on disk (`split_summary.json`, both pass the leakage check):
+
+| Hazard | Total chips | Total events | Train | Val | Test |
+|---|---|---|---|---|---|
+| Flood | 160 | 38 | 118 chips / 26 events | 26 chips / 7 events | 16 chips / 5 events |
+| Burnt | 1000 | 315 | 700 chips / 181 events | 150 chips / 67 events | 150 chips / 67 events |
+
+**Known gaps for the team to review before treating this as final:**
+- Burnt's `severity_class` is `unknown` for all 1000 chips — `SEVERITY_FIELD_CANDIDATES` (the list of
+  JSON fields probed for a damage fraction) doesn't include a burnt-specific field, so severity
+  stratification is currently only real for Flood; Burnt splits are event-atomic and volume-balanced but
+  not severity-stratified.
+- `main()` in `repackage_agdamage.py` hard-truncates to `chips = chips[:1000]` — Burnt's chip count
+  (1000) exactly matches this cap, suggesting the current `AgDamage_v2/Burnt` was built with a
+  debug/test limit active rather than the full available Burnt chip set.
+- `discover_chips()` currently has `if hazard == "Burnt": continue`, i.e. this exact script version
+  skips Burnt entirely — the shipped `AgDamage_v2/Burnt` shards must have been produced by a different
+  invocation/version of the script; running this file as-is will not regenerate Burnt data.
+- The proximity-buffering step described in `CLAUDE.md` §4 (clustering events close in space *and* time
+  into one super-group before splitting, with a spatial dead-zone between train/test) is not implemented
+  in this script — only event-atomicity + severity-stratification + volume-balancing are.
+
+## Evaluation Design
+
+### Task A: Segmentation
+
+Per-pixel damage classification (unaffected / non-crop / damaged) on each hazard, holding the rest of
+the training protocol constant across models (decoder, patch size, augmentation, criterion, optimizer
+budget — see `configs/segmentation/*.yaml`) so differences in results reflect the encoder, not the setup.
+Three encoders × three hazard scopes = 9 configs:
+
+| Encoder | Flood | Burnt | Pooled |
+|---|---|---|---|
+| Terramind | `terramind_flood.yaml` | `terramind_burnt.yaml` | `terramind_pooled.yaml` |
+| U-Net (non-FM floor) | `unet_flood.yaml` | `unet_burnt.yaml` | `unet_pooled.yaml` |
+| Prithvi | `prithvi_flood.yaml` | `prithvi_burnt.yaml` | `prithvi_pooled.yaml` |
+
+- **Flood / Burnt** configs train on one hazard and evaluate two ways: **in-distribution** (same hazard's
+  test split) and **leave-one-hazard-out (LOHO)** — zero-shot on the *other* hazard's test split, the
+  headline cross-hazard generalization check.
+- **Pooled** configs train on both hazards together and evaluate in-distribution on the pooled test split
+  plus a per-hazard breakdown, so pooling gains/losses are visible per hazard rather than averaged away.
+- **U-Net** is the from-scratch, non-foundation-model floor — run first, before treating any FM's number
+  as meaningful, since it's the only way to tell whether a foundation model is actually adding value here.
+- Reported metrics are macro-averaged **by event** (with bootstrap CIs) as the headline number, plus a
+  micro (pixel-pooled) number — see `Evaluator._macro_and_micro_metrics`.
+
+### Task B: Change Detection
+
+*(Empty — not yet designed/implemented.)* Scaffolded at `configs/change_detection/` (see its README)
+mirroring Task A's 3-encoder × 3-hazard-scope layout once ready.
+
+### Future work: Finetune vs. Frozen FMs
+
+`encoder.finetune` (true/false) already exists per-config, but every current config picks one setting
+rather than running both. Per `CLAUDE.md` §5's fairness protocol, both should be reported for each
+foundation model — frozen-encoder as the default probe of pretrained representation quality, full
+fine-tune for the top-performing model(s) — since which one wins can flip the ranking between FMs.
+
 
 ## Acknowledgements
 

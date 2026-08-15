@@ -15,9 +15,9 @@ set -Eeuo pipefail
 
 ## USAGE::
 # Minimal (default): sbatch slurm/terramind.slurm
-# Debug infra logs: sbatch --export=DATA_SIZE=curriculum_terramind,SLURM_LOG_LEVEL=debug slurm/terramind.slurm
+# Debug infra logs: sbatch --export=DATA_SIZE=test,SLURM_LOG_LEVEL=debug slurm/terramind.slurm
 
-DATA_SIZE=${DATA_SIZE:-large} #curriculum_terramind|large|small
+DATA_SIZE=${DATA_SIZE:-large} #large|test
 SLURM_LOG_LEVEL="${SLURM_LOG_LEVEL:-minimal}"  # minimal|debug
 PROJ_DIR="/users/PGS0218/julina/projects/geography/Crop-Damage-Benchmark/"
 LOG_DIR="${PROJ_DIR}/data/slurm_logs"
@@ -60,21 +60,16 @@ export HYDRA_FULL_ERROR=1
 case $DATA_SIZE in
   large)
     CMD=(
-      python3 -u -m crop_damage 
+      python3 -u -m crop_damage "--config-name=segmentation/terramind"
     )
     ;;
-  small)
+  test)
     CMD=(
-      python3 -u -m crop_damage "--config-name=terramind_small"
-    )
-    ;;
-  curriculum_terramind)
-    CMD=(
-      python3 -u -m crop_damage "--config-name=curriculum_terramind"
+      python3 -u -m crop_damage "--config-name=terramind_test"
     )
     ;;
   *)
-    >&2 echo "ERROR: Invalid job type '${DATA_SIZE}'. Valid options: {large|small|curriculum_terramind}"
+    >&2 echo "ERROR: Invalid job type '${DATA_SIZE}'. Valid options: {large|test}"
     exit 2
     ;;
 esac

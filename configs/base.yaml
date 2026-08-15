@@ -17,7 +17,7 @@ hydra:
   # mode: run
   run:
     # dir: ${hydra:runtime.cwd}/data/experiments/${hydra.job.config_name}_${experiment_name}_${now:%Y-%m-%d}_${now:%H%M%S}
-    dir: ${hydra:runtime.cwd}/data/experiments/${experiment_name}/${hydra.job.config_name}_${now:%Y-%m-%d}_${now:%H%M%S}
+    dir: ${hydra:runtime.cwd}/data/experiments/${task}/${hydra.job.config_name}_${now:%Y-%m-%d}_${now:%H%M%S}
     # dir: ${hydra:runtime.cwd}/data/experiments/${experiment_name}/${hydra.job.config_name}_${now:%Y-%m-%d}_${now:%H%M%S}_job${oc.env:SLURM_JOB_ID,local}
   # sweeper:
     # params:

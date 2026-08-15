@@ -47,7 +47,7 @@ _MODALITY_PRE_POST_KEYS = {
 #           2=unaffected cropland, 3=excluded cropland (QC), 4=non-cropland.
 #   band 4: binary cropland-intersection mask (1 where band1 in {1,2,3}).
 # Remapped here to match the pre-existing model.{ignore_index,negative_class,
-# positive_class} = (0,1,2) convention already used in configs/terramind.yaml.
+# positive_class} = (0,1,2) convention already used in configs/segmentation/*.yaml.
 DEFAULT_LABEL_BAND = 1
 DEFAULT_LABEL_NODATA = 255
 DEFAULT_IGNORE_INDEX = 0
@@ -149,7 +149,7 @@ class AgDamageShardDataset(Dataset):
         if self.mode == "train_val" and self.split == "train" and self.num_augmentations > 0:
             self.augment = transforms.Compose([RandomFlipPair(), RandomRotationPair()])
 
-    def _build_index(self) -> list[tuple[str, Path, str]]:
+    def _build_index(self) -> list[tuple[str, Path, str, str]]:
         rows = []
         for hazard in self.hazards:
             hazard_dir = self.data_root / hazard
@@ -160,8 +160,14 @@ class AgDamageShardDataset(Dataset):
             manifest = manifest[manifest["split"] == self.split]
             for _, row in manifest.iterrows():
                 shard_path = hazard_dir / "shards" / self.split / row["shard"]
-                rows.append((hazard, shard_path, row["chip_id"]))
+                rows.append((hazard, shard_path, row["chip_id"], row["event_id"]))
         return rows
+
+    def event_id_for_chip(self, i: int) -> str:
+        """Event grouping key for chip i (manifest's `event_id` column) --
+        used to macro-average metrics by event rather than by chip/pixel,
+        per CLAUDE.md's event-grouped evaluation protocol."""
+        return self.index[i][3]
 
     # ------------------- patch grid (mirrors DataLoader.py) -------------------
 
@@ -191,11 +197,20 @@ class AgDamageShardDataset(Dataset):
         return coords
 
     def _chip_shape(self, i: int):
-        hazard, shard_path, chip_id = self.index[i]
-        tar = self._get_tar(shard_path)
+        # Uses a short-lived, UNcached tar handle (not self._get_tar) --
+        # this always runs in __init__, in the main process, before
+        # DataLoader forks worker processes. Caching the handle here would
+        # leak an open (and OS-fd-shared) TarFile into every forked worker's
+        # self._open_tars; concurrent reads through that shared fd from
+        # multiple processes corrupt each other's reads (surfaces as
+        # rasterio "not recognized as being in a supported file format").
+        # _get_tar()'s per-worker caching is safe because it only ever
+        # populates lazily, post-fork, inside each worker's own process.
+        hazard, shard_path, chip_id, _event_id = self.index[i]
         first_mod = self.modalities[0]
         pre_key, _ = _MODALITY_PRE_POST_KEYS[first_mod]
-        raw = tar.extractfile(f"{chip_id}.{pre_key}.tif").read()
+        with tarfile.open(shard_path, "r") as tar:
+            raw = tar.extractfile(f"{chip_id}.{pre_key}.tif").read()
         with MemoryFile(raw) as mf, mf.open() as src:
             return src.height, src.width
 
@@ -261,7 +276,7 @@ class AgDamageShardDataset(Dataset):
         return y, meta
 
     def _read_chip(self, i: int) -> dict:
-        hazard, shard_path, chip_id = self.index[i]
+        hazard, shard_path, chip_id, _event_id = self.index[i]
         tar = self._get_tar(shard_path)
 
         before, after = {}, {}

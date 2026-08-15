@@ -13,12 +13,9 @@ MODALITY_SUFFIXES = {
     "s2_pre": "_s2_pre.tif", "s2_post": "_s2_post.tif", "label": "_label.tif",
 }
 SIDECAR_SUFFIX = ".json"
-SEVERITY_FIELD_CANDIDATES = ["flooded_crop_frac", "damaged_crop_frac",
-    "crop_damage_frac", "flood_frac", "damage_frac", "label_frac"]
-SEVERITY_BINS = [(0.01, "none"), (0.10, "minor"), (0.30, "moderate"),
-                 (0.60, "severe"), (1.01, "catastrophic")]
-logging.basicConfig(level=logging.INFO, format="%(asctime)s  %(levelname)-7s %(message)s",
-                    datefmt="%H:%M:%S")
+SEVERITY_FIELD_CANDIDATES = ["flooded_crop_frac", "damaged_crop_frac", "crop_damage_frac", "flood_frac", "damage_frac", "label_frac"]
+SEVERITY_BINS = [(0.01, "none"), (0.10, "minor"), (0.30, "moderate"), (0.60, "severe"), (1.01, "catastrophic")]
+logging.basicConfig(level=logging.INFO, format="%(asctime)s  %(levelname)-7s %(message)s", datefmt="%H:%M:%S")
 log = logging.getLogger("repackage")
 try:
     from tqdm import tqdm
@@ -39,6 +36,7 @@ def discover_chips(src: Path):
     hazard_dirs = [p for p in sorted(src.iterdir()) if p.is_dir() and (p / "chips").is_dir()]
     for hazard_dir in hazard_dirs:
         hazard = hazard_dir.name
+        if hazard == "Burnt": continue
         event_dirs = [p for p in sorted((hazard_dir / "chips").iterdir()) if p.is_dir()]
         log.info("[%s] scanning %d event folders", hazard, len(event_dirs))
         for ev_dir in event_dirs:
@@ -190,6 +188,7 @@ def main(argv=None):
     if abs(sum(args.ratios) - 1.0) > 1e-6: ap.error("--ratios must sum to 1.0")
     args.out.mkdir(parents=True, exist_ok=True)
     chips, dropped = discover_chips(args.src)
+    chips = chips[:1000]
     if not chips: log.error("no chips"); return 1
     if dropped: pd.DataFrame(dropped).to_csv(args.out / "dropped_chips.csv", index=False)
     attach_metadata(chips, args.src)
