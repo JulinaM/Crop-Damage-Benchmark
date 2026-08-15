@@ -2,7 +2,7 @@ defaults:
   - base
   - _self_
 
-experiment_name: dev-run-small
+experiment_name: Segmentation
 
 train_loader: 
   modalities:

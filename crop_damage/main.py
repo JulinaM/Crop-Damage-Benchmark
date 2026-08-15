@@ -11,6 +11,7 @@ from torch.utils.data import DataLoader
 
 from crop_damage.Evaluator import Evaluator
 from crop_damage.Trainer import Trainer
+from crop_damage.datasets.AgDamageShardDataset import AgDamageShardDataset
 from crop_damage.datasets.CurriculumDataManager import CurriculumDataManager
 from crop_damage.datasets.DataLoader import TestLoader, Train_Val_Loader
 from crop_damage.logger import init_logger
@@ -59,7 +60,52 @@ def init_wandb_run(cfg: DictConfig, exp_dir: Path, exp_name: str):
     return run
 
 
+# Maps main.py's train/val split naming onto the manifest.parquet `split`
+# column values ("train"/"val"/"test") used by AgDamageShardDataset.
+_AGDAMAGE_SPLIT_MAP = {"train": "train", "validation": "val"}
+
+
+def _agdamage_modalities(loader_cfg: DictConfig) -> list[str]:
+    if getattr(loader_cfg, "modalities", None):
+        return list(loader_cfg.modalities.keys())
+    return ["S2L2A", "S1GRD"]
+
+
+def _agdamage_class_remap(loader_cfg: DictConfig) -> dict | None:
+    remap = getattr(loader_cfg, "class_remap", None)
+    if not remap:
+        return None
+    return {int(k): int(v) for k, v in OmegaConf.to_container(remap).items()}
+
+
+def build_agdamage_dataset(loader_cfg: DictConfig, split: str, mode: str) -> AgDamageShardDataset:
+    return AgDamageShardDataset(
+        data_root=loader_cfg.data_root,
+        hazards=list(loader_cfg.hazards),
+        split=split,
+        modalities=_agdamage_modalities(loader_cfg),
+        label_band=getattr(loader_cfg, "label_band", 1),
+        label_nodata=getattr(loader_cfg, "label_nodata", 255),
+        ignore_index=getattr(loader_cfg, "ignore_index", 0),
+        class_remap=_agdamage_class_remap(loader_cfg),
+        patch_size=loader_cfg.patch_size,
+        stride=getattr(loader_cfg, "stride", loader_cfg.patch_size),
+        num_augmentations=getattr(loader_cfg, "num_augmentations", 0),
+        preload=getattr(loader_cfg, "preload", False),
+        mode=mode,
+    )
+
+
 def build_loader(loader_cfg: DictConfig, split: str) -> DataLoader:
+    if getattr(loader_cfg, "dataset", "legacy") == "agdamage_shard":
+        dataset = build_agdamage_dataset(loader_cfg, _AGDAMAGE_SPLIT_MAP.get(split, split), mode="train_val")
+        return DataLoader(
+            dataset,
+            batch_size=loader_cfg.batch_size,
+            shuffle=loader_cfg.shuffle,
+            num_workers=getattr(loader_cfg, "num_workers", 0),
+        )
+
     modalities = {name: (paths.before, paths.after) for name, paths in loader_cfg.modalities.items()}
     dataset = Train_Val_Loader(
         modalities=modalities,
@@ -82,6 +128,14 @@ def build_holdout_loader(loader_cfg: DictConfig | None) -> DataLoader | None:
     if loader_cfg is None:
         return None
 
+    if getattr(loader_cfg, "dataset", "legacy") == "agdamage_shard":
+        dataset = build_agdamage_dataset(loader_cfg, getattr(loader_cfg, "split", "test"), mode="test")
+        return DataLoader(
+            dataset,
+            batch_size=None,
+            num_workers=getattr(loader_cfg, "num_workers", 0),
+        )
+
     modalities = {name: (paths.before, paths.after) for name, paths in loader_cfg.modalities.items()}
     dataset = TestLoader(
         modalities=modalities,
@@ -98,6 +152,17 @@ def build_holdout_loader(loader_cfg: DictConfig | None) -> DataLoader | None:
 
 def build_holdout_loaders(cfg: DictConfig) -> dict[str, DataLoader]:
     holdout_loaders = {}
+
+    eval_loaders_cfg = cfg.get("eval_loaders")
+    if eval_loaders_cfg:
+        for eval_name, loader_cfg in eval_loaders_cfg.items():
+            loader = build_holdout_loader(loader_cfg)
+            if loader is not None:
+                holdout_loaders[eval_name] = loader
+        return holdout_loaders
+
+    # Legacy fallback: fixed flood/conflict pair, used by curriculum_terramind.yaml
+    # which doesn't define eval_loaders.
     for eval_name, loader_key in (
         ("conflict", "holdout_loader"),
         ("flood", "flood_holdout_loader"),

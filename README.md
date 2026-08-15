@@ -1,7 +1,7 @@
 # Crop Damage Benchmark
-
+ Existing EO disaster datasets are fragmented by hazard, centered on building or urban damage (e.g., xBD, BRIGHT), or limited to flood and burn-scar extent with no link to cropland. The gap persists at the foundation-model level: across geospatial foundation model (GeoFM) benchmarks such as GEO-Bench, PANGAEA, and GEO-Bench-2, the only recurring disaster tasks are flood, burn-scar, and building-damage segmentation, leaving agricultural impact unrepresented. 
+ We introduce CropDamage Benchmark, a multi-hazard, extent benchmark that connects observed disaster extent to cropland, and is architected so that severity (damage) can later be layered onto the same imagery. CropDamage Benchmark pairs bi-temporal (pre/post-event) Sentinel-1 SAR and Sentinel-2 optical imagery at 10 m, tiled into foundation-model-native 512x512 chips, providing pixel-wise three-class extent masks (unaffected / non-crops / damaged) and a derived cropland-intersection mask from USDA CDL and ESA WorldCover. 
  
-
 —
  
 
@@ -63,9 +63,10 @@ SLURM options: `DATA_SIZE=large|small` (default `large`), `SLURM_LOG_LEVEL=debug
 
 The benchmark dataset is built from raw Sentinel-1/Sentinel-2 scenes and split into
 
-Train/Validation/Test sets stratified by hazard and agroecological context. See
+Train/Validation/Test sets stratified by hazard and agroecological context. The link to full dataset is `https://huggingface.co/datasets/eadrah/AgDamage_Benchmark`
 
-[`dataset_construction/`](dataset_construction/) for the pipeline.
+
+See [`dataset_construction/`](dataset_construction/) for the pipeline.
 
  
 

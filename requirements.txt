@@ -212,3 +212,10 @@ zc.lockfile==2.0
 zope.event==4.5.0
 zope.interface==5.4.0
 zope.sqlalchemy==1.6
+
+# Added for crop_damage.datasets.AgDamageShardDataset (reads AgDamage_v2 .tar
+# shards). NOTE: this file is a stale OS-package freeze disconnected from the
+# real training environment (the "lora" conda env used by slurm/terramind.slurm);
+# `pip install -r requirements.txt` will not reproduce that env. The actionable
+# step is `pip install webdataset` inside "lora" directly.
+webdataset==1.0.2

@@ -2,7 +2,7 @@ experiment_name: ??
 
 dry_run: False
 wandb:
-  project: damage-mapping
+  project: Crop-Damage-Benchmark
   name: null
   entity: julinam-kent-state-university
   mode: online
@@ -10,6 +10,8 @@ wandb:
 change:
   method: difference
   attention_heads: 4
+
+task: ??
 
 hydra:
   # mode: run

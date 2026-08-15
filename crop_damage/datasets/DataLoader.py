@@ -14,7 +14,7 @@ import logging
 
 from crop_damage.models.utils import standardize, RandomFlipPair, RandomRotationPair
 
-INPUT_DIR = Path("/users/PGS0218/julina/projects/geography/damage_mapping_terramind/V2/data/input/")
+INPUT_DIR = Path("/users/PGS0218/julina/projects/geography/Crop-Damage-Benchmark/data/input/J_AgDamage/")
 LOGGER = logging.getLogger(__name__)
 EXPECTED_MODALITY_BANDS = {
     "S2L2A": ("B2", "B3", "B4", "B5", "B6", "B7", "B8", "B8A", "B9", "B11", "B12", "NDVI"),
