@@ -142,7 +142,22 @@ def move_to_device(batch, device):
         return [move_to_device(v, device) for v in batch]
     else:
         return batch
-    
+
+
+def add_batch_dim(batch):
+    """
+    Helper to prepend a batch dimension to (unbatched) tensors, e.g. when a
+    DataLoader is configured with batch_size=None and yields one sample at a
+    time without collation.
+    """
+    if torch.is_tensor(batch):
+        return batch.unsqueeze(0)
+    elif isinstance(batch, dict):
+        return {k: add_batch_dim(v) for k, v in batch.items()}
+    elif isinstance(batch, list) or isinstance(batch, tuple):
+        return [add_batch_dim(v) for v in batch]
+    else:
+        return batch
 
 
 # Set seeds

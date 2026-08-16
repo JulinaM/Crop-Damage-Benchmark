@@ -15,6 +15,8 @@ import pandas as pd
 import rasterio as rio
 from IPython.display import display
 
+from crop_damage.datasets.AgDamageShardDataset import AgDamageShardDataset
+
 DISPLAY_NAMES = {
     "change.method": "Method",
     "curriculum.flood_epochs": "Flood Epoch",
@@ -90,17 +92,77 @@ def _resolve_eval_paths(run_dir: Path, eval_name: str | None = None) -> dict[str
     }
 
 
-def _resolve_holdout_dirs(project_root: Path, eval_name: str | None = None) -> dict[str, Path]:
-    if eval_name == "flood":
-        input_root = project_root / 'data/input/flood_data/Test'
-    else:
-        input_root = project_root / 'data/input/Images_large/Test'
+def _find_hydra_config(run_dir: Path) -> Path | None:
+    """.hydra/config.yaml lives at the true experiment run root, but callers
+    of `main()` sometimes pass `run_dirr` already including the eval-loader
+    subdirectory (e.g. 'terramind_test_.../in_distribution'), in which case
+    `run_dir` here is actually that eval subdir -- check both."""
+    for candidate in (run_dir, run_dir.parent):
+        config_path = candidate / '.hydra' / 'config.yaml'
+        if config_path.exists():
+            return config_path
+    return None
 
-    return {
-        "before": input_root / 'Before/S2L2A',
-        "after": input_root / 'After/S2L2A',
-        "labels": input_root / 'Labels',
-    }
+
+def _load_eval_loader_cfg(run_dir: Path, eval_dir: Path) -> dict | None:
+    """Loads cfg.eval_loaders[<eval_dir.name>] from the run's saved hydra
+    config -- used to rebuild ground-truth labels straight from the AgDamage
+    shards, since Evaluator (crop_damage/Evaluator.py) only ever persists
+    *predictions* as GeoTIFFs, never ground truth."""
+    config_path = _find_hydra_config(run_dir)
+    if config_path is None:
+        return None
+    cfg = load_config(config_path)
+    return (cfg.get('eval_loaders') or {}).get(eval_dir.name)
+
+
+def reconstruct_ground_truth_tiles(project_root: Path, loader_cfg: dict) -> dict[int, np.ndarray]:
+    """Rebuild full-chip ground-truth label mosaics straight from the AgDamage
+    shards (there's no on-disk holdout label directory in this pipeline --
+    labels live packed inside the WebDataset shards, keyed by manifest split).
+
+    Takes the padded per-chip label directly from `_read_chip` rather than
+    stitching individual patches back together: with stride == patch_size
+    (the default, used by every config in this repo), each patch is a
+    non-overlapping tile of the same padded chip, so the padded chip already
+    *is* the exact mosaic Evaluator's patch-stitching would produce -- see
+    AgDamageShardDataset._pad_image/_extract_patch. The centered grid-padding
+    _pad_image adds is then cropped back off to the chip's native shape.
+    """
+    data_root = Path(loader_cfg['data_root'])
+    if not data_root.is_absolute():
+        data_root = project_root / data_root
+
+    dataset = AgDamageShardDataset(
+        data_root=data_root,
+        hazards=loader_cfg['hazards'],
+        split=loader_cfg.get('split', 'test'),
+        modalities=list(loader_cfg.get('modalities', {}).keys()) or ['S2L2A', 'S1GRD'],
+        label_band=loader_cfg.get('label_band', 1),
+        label_nodata=loader_cfg.get('label_nodata', 255),
+        class_remap=loader_cfg.get('class_remap'),
+        patch_size=loader_cfg['patch_size'],
+        stride=loader_cfg.get('stride', loader_cfg['patch_size']),
+        max_chips=loader_cfg.get('max_chips'),
+        mode='test',
+    )
+    if dataset.stride != dataset.patch_size:
+        raise ValueError(
+            f'reconstruct_ground_truth_tiles assumes stride == patch_size (got '
+            f'stride={dataset.stride}, patch_size={dataset.patch_size}); the padded-chip '
+            f'shortcut above would need real patch stitching instead.'
+        )
+
+    tiles = {}
+    for chip_idx in range(len(dataset.index)):
+        chip = dataset._read_chip(chip_idx)
+        padded_h, padded_w = chip['y'].shape
+        native_h, native_w = dataset._chip_shape(chip_idx)
+        pad_top = (padded_h - native_h) // 2
+        pad_left = (padded_w - native_w) // 2
+        crop = (slice(pad_top, pad_top + native_h), slice(pad_left, pad_left + native_w))
+        tiles[chip_idx] = chip['y'].numpy().astype(np.uint8)[crop]
+    return tiles
 
 
 def read_single_band(path: Path) -> np.ndarray:
@@ -125,21 +187,25 @@ def build_diff_map(truth: np.ndarray, pred: np.ndarray) -> np.ndarray:
 
 
 def parse_metrics(metrics_path: Path) -> pd.DataFrame:
-    pattern = re.compile(
-        r'Image\s+(?P<image_id>\d+)\s+metrics:\s+'
-        r'Accuracy:\s+(?P<Accuracy>[0-9.]+)\s+'
-        r'Precision:\s+(?P<Precision>[0-9.]+)\s+'
-        r'Recall:\s+(?P<Recall>[0-9.]+)\s+'
-        r'F1:\s+(?P<F1>[0-9.]+)\s+'
-        r'IoU:\s+(?P<IoU>[0-9.]+)',
-        re.MULTILINE,
-    )
+    """Pulls the 'Per-chip metrics:' block out of metrics.txt (written by
+    crop_damage.Evaluator._save_metrics_and_visualizations); the file also has
+    Summary/Macro/Micro/Per-event sections this ignores, e.g.:
+
+        Per-chip metrics:
+
+          Chip 0:
+            Accuracy: 0.2999
+            ...
+    """
+    text = metrics_path.read_text()
+    section = text.split('Per-chip metrics:', 1)[1]
+    chip_pattern = re.compile(r'Chip (\d+):\n((?:\s+\S+: [0-9.eE+-]+\n?)+)')
+    kv_pattern = re.compile(r'(\S+): ([0-9.eE+-]+)')
+
     records = []
-    for m in pattern.finditer(metrics_path.read_text()):
-        row = m.groupdict()
-        row['image_id'] = int(row['image_id'])
-        for k in ('Accuracy', 'Precision', 'Recall', 'F1', 'IoU'):
-            row[k] = float(row[k])
+    for image_id, body in chip_pattern.findall(section):
+        row = {'image_id': int(image_id)}
+        row.update({key: float(value) for key, value in kv_pattern.findall(body)})
         records.append(row)
     return pd.DataFrame(records).sort_values('image_id').reset_index(drop=True)
 
@@ -391,7 +457,7 @@ def extract_config_params(cfg: dict, keys: list) -> dict:
 # Main loop
 # ---------------------------------------------------------------------------
 def main(run_dirr=None, display_method=False, config_keys=None, eval_name=None, dataset=None):
-    PROJECT_ROOT = Path('/users/PGS0218/julina/projects/geography/damage_mapping_terramind/V2')
+    PROJECT_ROOT = Path(__file__).resolve().parents[2]
     EXP_DIR = PROJECT_ROOT / "data/experiments"
     if isinstance(display_method, (list, tuple)) and config_keys is None:
         config_keys = list(display_method)
@@ -405,45 +471,59 @@ def main(run_dirr=None, display_method=False, config_keys=None, eval_name=None, 
     # print("--->", run_dir)
 
     eval_paths = _resolve_eval_paths(run_dir, eval_name)
-    holdout_dirs = _resolve_holdout_dirs(PROJECT_ROOT, eval_name)
     pred_dir = eval_paths["pred_dir"]
-    holdout_before_dir = holdout_dirs["before"]
-    holdout_after_dir = holdout_dirs["after"]
-    holdout_label_dir = holdout_dirs["labels"]
+    eval_dir = eval_paths["eval_dir"]
 
-    pred_files   = sorted(pred_dir.glob('predicted_map_*_colored.tif'))
-    label_files  = sorted(holdout_label_dir.glob('*.tif'))
-    before_files = sorted(holdout_before_dir.glob('*.tif'))
-    after_files  = sorted(holdout_after_dir.glob('*.tif'))
+    pred_files = sorted(
+        pred_dir.glob('predicted_map_*_colored.tif'),
+        key=lambda p: int(re.search(r'\d+', p.stem).group()),
+    )
 
     print(f'\nRun directory      : {run_dirr}')
     print(f'Evaluation set     : {eval_name or "default"}')
     print(f'Prediction dir     : {pred_dir}')
     print(f'Prediction files   : {len(pred_files)}')
-    print(f'Holdout labels     : {len(label_files)}')
-    assert len(pred_files) == len(label_files) == len(before_files) == len(after_files), 'Holdout file counts do not match.'
+
+    loader_cfg = _load_eval_loader_cfg(run_dir, eval_dir)
+    if loader_cfg is None:
+        raise FileNotFoundError(
+            f"No eval_loaders['{eval_dir.name}'] entry found in .hydra/config.yaml under "
+            f"{run_dir} or {run_dir.parent} -- can't reconstruct ground-truth labels for this run."
+        )
+    ground_truth_tiles = reconstruct_ground_truth_tiles(PROJECT_ROOT, loader_cfg)
+    print(f'Ground-truth tiles : {len(ground_truth_tiles)}')
+    assert len(pred_files) == len(ground_truth_tiles), 'Prediction / ground-truth chip counts do not match.'
+
     metrics_df = parse_metrics(eval_paths["metrics_path"])
-    metrics_df['label_file']      = [p.name for p in label_files]
+    assert len(metrics_df) == len(pred_files), 'metrics.txt per-chip rows do not match prediction file count.'
     metrics_df['prediction_file'] = [p.name for p in pred_files]
     # display(metrics_df)
 
     poster_dir = eval_paths["poster_dir"]
     poster_dir.mkdir(exist_ok=True)
 
-    cfg = load_config(run_dir / '.hydra/config.yaml')
+    cfg = load_config(_find_hydra_config(run_dir))
     config_info = extract_config_params(cfg, config_keys or ["change.method","curriculum.flood_epochs", "curriculum.conflict_epochs",])
 
     print(f'Generating {len(pred_files)} poster-quality figure(s) → {poster_dir}')
 
-    for tile_idx in range(len(pred_files)):
-        label      = read_single_band(label_files[tile_idx]).astype(np.uint8)
-        prediction = read_single_band(pred_files[tile_idx]).astype(np.uint8)
+    for tile_idx, pred_path in enumerate(pred_files):
+        chip_id = int(re.search(r'\d+', pred_path.stem).group())
+        label      = ground_truth_tiles[chip_id]
+        prediction = read_single_band(pred_path).astype(np.uint8)
+        if prediction.shape != label.shape:
+            # Evaluator saves predictions at the padded (grid-aligned) canvas
+            # size; crop to the same centered native window used for the
+            # ground-truth reconstruction above so shapes match.
+            pad_top = (prediction.shape[0] - label.shape[0]) // 2
+            pad_left = (prediction.shape[1] - label.shape[1]) // 2
+            prediction = prediction[pad_top:pad_top + label.shape[0], pad_left:pad_left + label.shape[1]]
 
         label_rgb      = colorize(label, CLASS_COLORS)
         prediction_rgb = colorize(prediction, CLASS_COLORS)
         diff_rgb       = build_diff_map(label, prediction)
 
-        row = metrics_df.iloc[tile_idx]
+        row = metrics_df.loc[metrics_df.image_id == chip_id].iloc[0]
         out_path = poster_dir / f'poster_tile_{tile_idx + 1:02d}.png'
 
         make_poster_figure(
@@ -452,8 +532,8 @@ def main(run_dirr=None, display_method=False, config_keys=None, eval_name=None, 
             prediction_rgb = prediction_rgb,
             diff_rgb       = diff_rgb,
             metrics_row    = row,
-            label_name     = label_files[tile_idx].name,
-            pred_name      = pred_files[tile_idx].name,
+            label_name     = f'chip_{chip_id}_ground_truth',
+            pred_name      = pred_path.name,
             output_path    = out_path,
             config_info    = config_info,
             display_method = display_method

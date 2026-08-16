@@ -84,6 +84,7 @@ def build_agdamage_dataset(loader_cfg: DictConfig, split: str, mode: str) -> AgD
         stride=getattr(loader_cfg, "stride", loader_cfg.patch_size),
         num_augmentations=getattr(loader_cfg, "num_augmentations", 0),
         preload=getattr(loader_cfg, "preload", False),
+        max_chips=getattr(loader_cfg, "max_chips", None),
         mode=mode,
     )
 

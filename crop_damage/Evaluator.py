@@ -14,6 +14,7 @@ from crop_damage.models.change_fusion import build_change_fusion
 from crop_damage.models.decoders import build_decoder
 from crop_damage.models.encoders import build_encoder
 from crop_damage.models.utils import (
+    add_batch_dim,
     bootstrap_ci,
     calc_confusion_counts,
     calc_epoch_metrics,
@@ -138,11 +139,12 @@ class Evaluator:
         with torch.no_grad():
             for inputs, target, (idx, coord_y, coord_x), pad, meta in dataloader:
                 inputs = move_to_device(inputs, self.device)
+                inputs = add_batch_dim(inputs)
                 z_before = encoder(inputs["before"])
                 z_after = encoder(inputs["after"])
                 fused_features = change_fusion(z_before, z_after)
                 logits = decoder(fused_features)
-                prediction = torch.argmax(logits, dim=1).cpu()
+                prediction = torch.argmax(logits, dim=1).cpu().squeeze(0)
 
                 idx = self._to_int(idx)
                 tile_reconstruction[idx].append(

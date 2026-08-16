@@ -21,6 +21,7 @@ train_loader:
   num_augmentations: 2
   patch_size: 224
   preload: False
+  max_chips: 40
   batch_size: 4
   shuffle: True
   num_workers: 2
@@ -37,6 +38,7 @@ validation_loader:
   class_remap: {1: 2, 2: 1, 3: 0, 4: 0}
   patch_size: 224
   preload: False
+  max_chips: 8
   batch_size: 4
   shuffle: False
   num_workers: 2
@@ -54,6 +56,7 @@ eval_loaders:
     label_nodata: 255
     class_remap: {1: 2, 2: 1, 3: 0, 4: 0}
     patch_size: 224
+    max_chips: 8
     num_workers: 2
 
 model:
@@ -80,7 +83,7 @@ decoder:
   channels: [64, 128, 256, 512, 1024]
 
 trainer:
-  n_epochs: 3
+  n_epochs: 2
   log_interval: 1
 
 use_wandb: False

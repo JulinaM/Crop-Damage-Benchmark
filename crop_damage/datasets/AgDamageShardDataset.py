@@ -80,6 +80,8 @@ class AgDamageShardDataset(Dataset):
         num_augmentations: 0 disables augmentation; >0 replays each patch that
             many times per epoch with random flip/rotation (train split only).
         preload: cache decoded chip tensors in memory across epochs.
+        max_chips: if set, keep only the first `max_chips` chips (post-split,
+            pre-patching) from the manifest -- for smoke tests, not real runs.
         mode: "train_val" returns (sample, y); "test" additionally returns
             (chip_idx, coord_y, coord_x), (0, 0, 0, 0), meta to match
             TestLoader's contract for Evaluator's tile-reconstruction code.
@@ -99,6 +101,7 @@ class AgDamageShardDataset(Dataset):
         stride: int = 224,
         num_augmentations: int = 0,
         preload: bool = False,
+        max_chips: int | None = None,
         mode: str = "train_val",
     ):
         if mode not in ("train_val", "test"):
@@ -122,6 +125,7 @@ class AgDamageShardDataset(Dataset):
         self.stride = stride
         self.num_augmentations = num_augmentations
         self.preload = preload
+        self.max_chips = max_chips
         self.mode = mode
         self.size_helper = 1 if self.num_augmentations == 0 else self.num_augmentations
 
@@ -130,6 +134,8 @@ class AgDamageShardDataset(Dataset):
             raise ValueError(
                 f"No chips found for hazards={self.hazards} split={split!r} under {self.data_root}"
             )
+        if self.max_chips is not None:
+            self.index = self.index[: self.max_chips]
         LOGGER.info(
             "AgDamageShardDataset: %d chips (hazards=%s, split=%s)",
             len(self.index), self.hazards, split,
