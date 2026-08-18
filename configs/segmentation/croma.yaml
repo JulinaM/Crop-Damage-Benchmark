@@ -1,0 +1,104 @@
+# @package _global_
+defaults:
+  - /base
+  - /dataset: flood
+  - _self_
+
+# Label class_remap and model.{ignore_index,negative_class,positive_class} are
+# tied together -- see crop_damage/datasets/AgDamageShardDataset.py header for
+# how the raw label.tif band-1 values map to these ids.
+#
+# hazards/patch_size/eval_loaders come from the `dataset` config group
+# (configs/dataset/{flood,burnt,pooled}.yaml) -- select at the CLI/slurm with
+# `dataset=flood|burnt|pooled`. Do not set hazards/patch_size below; they'd
+# override the selected dataset group since _self_ merges last.
+task: Segmentation
+experiment_name: ${task}_croma_${dataset_name}
+
+train_loader:
+  dataset: agdamage_shard
+  data_root: data/input/J_AgDamage/AgDamage_v2
+  modalities:
+    S2L2A: {}
+    S1GRD: {}
+  label_band: 1
+  label_nodata: 255
+  class_remap: {1: 2, 2: 1, 3: 0, 4: 0}
+  num_augmentations: 5
+  preload: False
+  batch_size: 4
+  shuffle: True
+  num_workers: 2
+
+validation_loader:
+  dataset: agdamage_shard
+  data_root: data/input/J_AgDamage/AgDamage_v2
+  modalities:
+    S2L2A: {}
+    S1GRD: {}
+  label_band: 1
+  label_nodata: 255
+  class_remap: {1: 2, 2: 1, 3: 0, 4: 0}
+  preload: False
+  batch_size: 4
+  shuffle: False
+  num_workers: 2
+
+model:
+  num_classes: 3
+  positive_class: 2
+  negative_class: 1
+  ignore_index: 0
+  learning_rate: 0.0005
+  num_epochs: 8
+  seed: 22
+
+# CROMA has no terratorch registry entry -- download a checkpoint once before
+# training/eval:
+#   wget https://huggingface.co/antofuller/CROMA/resolve/main/CROMA_base.pt -P data/checkpoints/croma/
+encoder:
+  name: CROMA
+  version: croma_base  # or croma_large
+  pretrained: true
+  finetune: false
+  modalities: ["S2L2A", "S1GRD"]
+  token_dim: 768  # 768 for croma_base, 1024 for croma_large
+  # UNet2D's fabricated token pyramid upsamples the shallowest selected
+  # feature by 2^(n_levels-1) and needs that to equal CROMA's patch size (8,
+  # fixed internally -- unlike TerraMind/Prithvi's 16) to land back on the
+  # input resolution. That forces exactly 4 levels here (2^3 = 8), not the
+  # 5 TerraMind/Prithvi use (2^4 = 16) -- decoder.channels below must match
+  # this length. croma_base's joint cross-encoder has 6 layers (0-5);
+  # croma_large has 12 (use e.g. [2, 5, 8, 11] instead).
+  feature_indices: [2, 3, 4, 5]
+  # Must exactly match the input H/W: CROMA bakes image_resolution into its
+  # positional-bias tensor shape at construction time (a mismatch crashes,
+  # it doesn't just degrade quality). Tracks whichever dataset group (flood/
+  # burnt/pooled) is selected via train_loader.patch_size.
+  image_size: ${train_loader.patch_size}
+  build_kwargs:
+    pretrained_path: data/checkpoints/croma/CROMA_base.pt
+
+decoder:
+  name: UNet
+  channels: [64, 128, 256, 512]  # 4 entries -- must match encoder.feature_indices length
+
+trainer:
+  n_epochs: 4
+  log_interval: 1
+
+use_wandb: False
+
+criterion:
+  name: ce #dice_focal, ce
+  apply_weight_loss: False
+  weight_type: inverse
+  dice_weight: 0.5
+  focal_weight: 0.5
+  focal_gamma: 2.0
+  focal_alpha: null
+  dice_smooth: 1e-6
+
+change:
+  method: attention_based_cross_time_fusion # concatenate_all_three, siamese_fusion, attention_based_cross_time_fusion, signed_difference_plus_absolute_difference
+  attention_heads: 4

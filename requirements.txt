@@ -219,3 +219,8 @@ zope.sqlalchemy==1.6
 # `pip install -r requirements.txt` will not reproduce that env. The actionable
 # step is `pip install webdataset` inside "lora" directly.
 webdataset==1.0.2
+
+# Added for crop_damage.models.third_party.croma_model (vendored from
+# antofuller/CROMA). Already present in "lora" (0.8.2) -- listed here for
+# documentation only, same caveat as webdataset above.
+einops==0.8.2

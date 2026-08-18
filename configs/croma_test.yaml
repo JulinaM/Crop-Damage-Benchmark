@@ -1,0 +1,114 @@
+defaults:
+  - base
+  - _self_
+
+# Fast smoke-test config: verifies the full AgDamageShardDataset pipeline
+# (loader -> encoder -> change fusion -> decoder -> trainer -> evaluator)
+# runs end to end in a couple minutes, for the CROMA encoder. Not meant for
+# real results. Mirrors terramind_test.yaml.
+task: Segmentation
+experiment_name: ${task}_small
+
+train_loader:
+  dataset: agdamage_shard
+  data_root: data/input/J_AgDamage/AgDamage_v2
+  hazards: [Flood]
+  modalities:
+    S2L2A: {}
+    S1GRD: {}
+  label_band: 1
+  label_nodata: 255
+  class_remap: {1: 2, 2: 1, 3: 0, 4: 0}
+  num_augmentations: 2
+  patch_size: 224
+  preload: False
+  max_chips: 40
+  batch_size: 4
+  shuffle: True
+  num_workers: 2
+
+validation_loader:
+  dataset: agdamage_shard
+  data_root: data/input/J_AgDamage/AgDamage_v2
+  hazards: [Flood]
+  modalities:
+    S2L2A: {}
+    S1GRD: {}
+  label_band: 1
+  label_nodata: 255
+  class_remap: {1: 2, 2: 1, 3: 0, 4: 0}
+  patch_size: 224
+  preload: False
+  max_chips: 8
+  batch_size: 4
+  shuffle: False
+  num_workers: 2
+
+eval_loaders:
+  in_distribution:
+    dataset: agdamage_shard
+    data_root: data/input/J_AgDamage/AgDamage_v2
+    hazards: [Flood]
+    split: test
+    modalities:
+      S2L2A: {}
+      S1GRD: {}
+    label_band: 1
+    label_nodata: 255
+    class_remap: {1: 2, 2: 1, 3: 0, 4: 0}
+    patch_size: 224
+    max_chips: 8
+    num_workers: 2
+
+model:
+  num_classes: 3
+  positive_class: 2
+  negative_class: 1
+  ignore_index: 0
+  learning_rate: 0.0005
+  num_epochs: 3
+  seed: 22
+
+# CROMA has no terratorch registry entry -- download a checkpoint once before
+# running this smoke test:
+#   wget https://huggingface.co/antofuller/CROMA/resolve/main/CROMA_base.pt -P data/checkpoints/croma/
+encoder:
+  name: CROMA
+  version: croma_base
+  pretrained: true
+  finetune: false
+  modalities: ["S2L2A", "S1GRD"]
+  token_dim: 768
+  # UNet2D's fabricated token pyramid requires exactly 4 levels for CROMA's
+  # fixed patch size of 8 (2^3=8), not TerraMind/Prithvi's 5 (2^4=16) -- see
+  # configs/segmentation/croma.yaml for the full explanation. decoder.channels
+  # below must match this length.
+  feature_indices: [2, 3, 4, 5]
+  # Must exactly match the input H/W -- see configs/segmentation/croma.yaml.
+  image_size: ${train_loader.patch_size}
+  build_kwargs:
+    pretrained_path: data/checkpoints/croma/CROMA_base.pt
+
+decoder:
+  name: UNet
+  channels: [64, 128, 256, 512]  # 4 entries -- must match encoder.feature_indices length
+
+trainer:
+  n_epochs: 2
+  log_interval: 1
+
+use_wandb: False
+
+criterion:
+  name: ce #dice_focal, ce
+  apply_weight_loss: True
+  weight_type: inverse
+  dice_weight: 0.5
+  focal_weight: 0.5
+  focal_gamma: 2.0
+  focal_alpha: null
+  dice_smooth: 1e-6
+
+change:
+  method: difference
+  attention_heads: 4
