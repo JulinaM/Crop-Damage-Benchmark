@@ -14,7 +14,7 @@ CropDamage Benchmark addresses that gap. It pairs bi-temporal Sentinel-1 SAR and
 | **Inputs** | Pre- and post-event Sentinel-2 L2A (12 bands) and Sentinel-1 GRD (VV, VH), 10 m, 512 × 512 px |
 | **Labels** | Per-pixel: damaged cropland, unaffected cropland, excluded cropland, non-cropland |
 | **Splits** | Event-disjoint train / val / test, plus a whole-country out-of-distribution hold-out per hazard |
-| **Models** | TerraMind, Prithvi-EO-2.0, CROMA, and a U-Net trained from scratch |
+| **Models** | TerraMind, Prithvi-EO-2.0, CROMA, AlphaEarth Foundations (planned), and a U-Net trained from scratch |
 | **Dataset** | [huggingface.co/datasets/eadrah/AgDamage_Benchmark](https://huggingface.co/datasets/eadrah/AgDamage_Benchmark) |
 
 ## Contents
@@ -23,11 +23,9 @@ CropDamage Benchmark addresses that gap. It pairs bi-temporal Sentinel-1 SAR and
 2. [Data preparation pipeline](#data-preparation-pipeline)
 3. [Model design](#model-design)
 4. [Experiments](#experiments)
-5. [Results](#results)
-6. [Extending the benchmark](#extending-the-benchmark)
-7. [Reproducing the experiments](#reproducing-the-experiments)
-8. [Repository layout](#repository-layout)
-9. [Limitations and roadmap](#limitations-and-roadmap)
+5. [Extending the benchmark](#extending-the-benchmark)
+6. [Reproducing the experiments](#reproducing-the-experiments)
+7. [Repository layout](#repository-layout)
 
 ## Design principles
 
@@ -39,7 +37,7 @@ CropDamage Benchmark addresses that gap. It pairs bi-temporal Sentinel-1 SAR and
 
 **Hazard-agnostic by construction.** Every hazard is stored, split and loaded through the same schema, loader and model interface. Adding a hazard is a data task, not a code change.
 
-**One protocol for every encoder.** Decoder, fusion module, input size, augmentation, loss, optimizer budget and model-selection rule are held constant, so differences in the results table reflect the pretrained representation.
+**One protocol for every encoder.** Decoder, fusion module, input size, augmentation, loss, optimizer budget and model-selection rule are held constant, so differences in results reflect the pretrained representation.
 
 ## Data preparation pipeline
 
@@ -131,17 +129,18 @@ flowchart LR
 | TerraMind | `terramind_v1_base` | Multimodal generative (S1, S2 and more) | TerraTorch backbone registry |
 | Prithvi-EO-2.0 | `prithvi_eo_v2_tiny_tl` | Masked autoencoding on HLS time series | TerraTorch backbone registry; six HLS-equivalent S2 bands plus VV/VH |
 | CROMA | `croma_base` | Contrastive and masked, joint S1 + S2 | Official implementation vendored; per-layer features captured by forward hooks |
+| AlphaEarth Foundations | Satellite Embedding | Multi-sensor embedding field model | Planned |
 | U-Net | 5-level, trained from scratch | None | Non-foundation-model reference |
 
 Each encoder has an input adapter that handles band selection and exposes a common interface (`decoder_spec`), so the training loop is model-agnostic.
 
-**Change fusion.** Features from the two dates are combined independently at each selected encoder level. Five interchangeable operators are implemented in [`change_fusion.py`](crop_damage/models/change_fusion.py): signed difference, concatenation of before/after/difference, signed plus absolute difference, a learned Siamese projection, and bidirectional cross-attention between the two dates. The reported experiments use cross-attention fusion.
+**Change fusion.** Features from the two dates are combined independently at each selected encoder level. Five interchangeable operators are implemented in [`change_fusion.py`](crop_damage/models/change_fusion.py): signed difference, concatenation of before/after/difference, signed plus absolute difference, a learned Siamese projection, and bidirectional cross-attention between the two dates. The default configuration uses cross-attention fusion.
 
 **Decoder.** A U-Net decoder ([`Decoder_UNet2D.py`](crop_damage/models/Decoder_UNet2D.py)) reshapes transformer tokens from five encoder blocks into a feature pyramid and decodes it to the input resolution.
 
 For the TerraMind configuration the encoder holds 87.7 M frozen parameters; the trainable part is the fusion module (17.7 M) and the decoder (32.6 M).
 
-**Known asymmetries across encoders.** CROMA tokenizes with a fixed 8-pixel patch, so its pyramid has four levels where the others have five, and it is run at 224 px rather than its 120 px pretraining resolution to keep input size identical across models. These are stated limitations of the comparison, not hidden implementation details.
+**Known asymmetries across encoders.** CROMA tokenizes with a fixed 8-pixel patch, so its pyramid has four levels where the others have five, and it is run at 224 px rather than its 120 px pretraining resolution to keep input size identical across models. Both are stated limitations of the comparison.
 
 ## Experiments
 
@@ -172,55 +171,11 @@ Predictions are stitched back to full chips, masked to cropland, and scored on t
 - **Micro.** Pixel counts pooled over the whole split, reported for comparison with pixel-level benchmarks.
 - **Two evaluation sets per hazard.** The in-distribution test split (unseen events) and the country-level OOD hold-out (unseen region).
 
-Every evaluation writes `metrics.txt`, a machine-readable `metrics.json` with per-event values, georeferenced prediction GeoTIFFs, and optional three-panel figures.
-
 ### Hyperparameter selection
 
 Hyperparameters are chosen on the validation split only. Sweeps run with the test and OOD loaders disabled, so no test information can reach model selection; the selected checkpoint is evaluated on the held-out sets once, afterwards.
 
 Each sweep is a W&B random search over learning rate (log-uniform, 1e-4 to 3e-3) and batch size (8 or 16), with Hyperband early termination and a fixed budget of 12 trials and 12 epochs per trial. The same search space and budget are applied to every encoder.
-
-## Results
-
-Results below are for **TerraMind-base with a frozen encoder**, selected by the protocol above, single seed. Brackets are 95 % bootstrap confidence intervals over events.
-
-| Train / test hazard | Evaluation set | Events | Chips | Macro IoU | Macro F1 | Micro IoU | Micro F1 |
-|---|---|---|---|---|---|---|---|
-| Flood | Test (unseen events) | 245 | 959 | 0.444 [0.415, 0.473] | 0.579 [0.551, 0.608] | 0.551 | 0.710 |
-| Flood | OOD (Philippines) | 21 | 68 | 0.354 [0.266, 0.451] | 0.485 [0.381, 0.592] | 0.440 | 0.611 |
-| Burnt | Test (unseen events) | 280 | 923 | 0.569 [0.546, 0.594] | 0.700 [0.678, 0.723] | 0.602 | 0.752 |
-| Burnt | OOD (South Africa) | 22 | 71 | 0.302 [0.241, 0.362] | 0.443 [0.365, 0.522] | 0.319 | 0.484 |
-
-Selected configurations: Flood, learning rate 1.2e-4 and batch size 16; Burnt, learning rate 1.1e-4 and batch size 8.
-
-### What the results show
-
-**The task is far from solved.** A frozen state-of-the-art multimodal foundation model reaches an event-macro IoU of 0.44 on flooded cropland and 0.57 on burnt cropland for unseen events in familiar regions.
-
-**Regional transfer is the hard problem.** Moving from unseen events to an unseen country lowers event-macro IoU from 0.44 to 0.35 for Flood and from 0.57 to 0.30 for Burnt. For Burnt the confidence intervals do not overlap. With about 20 events in each hold-out the OOD intervals are wide, and should be read as such.
-
-**Event-level and pixel-level scores disagree.** Micro IoU is consistently higher than event-macro IoU (0.55 against 0.44 for Flood). Large, clearly damaged events dominate pixel counts; small events are where models fail. Reporting only pixel-pooled scores would overstate performance.
-
-**Learning rate matters more for Flood than for Burnt.** Validation IoU for Flood rises from about 0.3 at learning rates above 2e-3 to 0.59 at 1e-4, then is flat down to 3e-5. For Burnt, validation IoU stays between 0.55 and 0.62 across the whole range, and the model shows high recall with lower precision, a tendency to over-predict burnt cropland that learning-rate tuning does not remove.
-
-### Qualitative examples
-
-Each example is the test chip whose IoU is closest to that hazard's test-set micro IoU, so it shows typical rather than best-case behaviour. Panels are ground truth, prediction, and their difference; non-cropland is masked.
-
-![Flood example](docs/figures/qualitative_flood_test.png)
-
-![Burnt example](docs/figures/qualitative_burnt_test.png)
-
-### Experiment status
-
-| Experiment | Status |
-|---|---|
-| TerraMind, frozen, Flood and Burnt, tuned | Reported above |
-| Prithvi-EO-2.0, CROMA and U-Net under the same tuned protocol | In progress |
-| Pooled training (Flood + Burnt) with per-hazard breakdown | Configs available |
-| Leave-one-hazard-out transfer (train on one hazard, test on the other) | Supported by the evaluator; not yet reported |
-| Frozen against fully fine-tuned encoders | Supported (`encoder.finetune`); not yet reported |
-| Change detection (Task B) | Planned |
 
 ## Extending the benchmark
 
@@ -316,16 +271,6 @@ slurm/                       # cluster launch scripts
 data/input/stratification/   # repackaging, OOD selection and split scripts; analysis notebooks
 dataset_construction/        # raw-data collection notes
 ```
-
-## Limitations and roadmap
-
-- **Single seed.** Reported numbers come from one run per configuration. Between-seed variance has not been measured, and small differences between configurations should not be over-read.
-- **One encoder reported so far.** Tuned results for Prithvi-EO-2.0, CROMA and the U-Net reference are needed before any claim about which foundation model is best, or about what pretraining adds over training from scratch.
-- **Small regional hold-outs.** Each OOD set is one country with roughly 20 events. It demonstrates a transfer gap; it does not characterise transfer in general. Additional hold-out regions are planned.
-- **No spatial buffer between splits.** Splits are event-disjoint and stratified, but nearby events are not yet clustered into super-groups with a dead-zone between train and test.
-- **Quality flags are recorded, not enforced.** Per-chip QC verdicts are carried in the manifest; the current runs filter only on Sentinel-1 availability.
-- **Frozen encoders only.** Fine-tuning, parameter-efficient adaptation, and data-scarce regimes (training on a limited number of events) are next.
-- **Labels inherit their sources.** Damage labels are derived from hazard-extent products and cropland layers, and carry the errors of both.
 
 ## Acknowledgements
 
