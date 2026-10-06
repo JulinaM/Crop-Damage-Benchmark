@@ -1,218 +1,336 @@
-# Crop Damage Benchmark
- Existing EO disaster datasets are fragmented by hazard, centered on building or urban damage (e.g., xBD, BRIGHT), or limited to flood and burn-scar extent with no link to cropland. The gap persists at the foundation-model level: across geospatial foundation model (GeoFM) benchmarks such as GEO-Bench, PANGAEA, and GEO-Bench-2, the only recurring disaster tasks are flood, burn-scar, and building-damage segmentation, leaving agricultural impact unrepresented. 
- We introduce CropDamage Benchmark, a multi-hazard, extent benchmark that connects observed disaster extent to cropland, and is architected so that severity (damage) can later be layered onto the same imagery. CropDamage Benchmark pairs bi-temporal (pre/post-event) Sentinel-1 SAR and Sentinel-2 optical imagery at 10 m, tiled into foundation-model-native 512x512 chips, providing pixel-wise three-class extent masks (unaffected / non-crops / damaged) and a derived cropland-intersection mask from USDA CDL and ESA WorldCover. 
- 
-—
- 
+# CropDamage Benchmark
 
-## Structure
+**A multi-hazard benchmark for mapping disaster damage to cropland with geospatial foundation models, evaluated on disaster events and regions the model has never seen.**
 
- 
+Disasters are mapped routinely; what they do to the land people depend on is not. Existing Earth-observation disaster datasets are fragmented by hazard, centred on buildings and urban damage (xBD, BRIGHT), or limited to flood and burn-scar *extent* with no link to what was growing underneath. The same gap persists in foundation-model evaluation: across GEO-Bench, PANGAEA and GEO-Bench-2, the recurring disaster tasks are flood, burn-scar and building-damage segmentation. Agricultural impact, the pathway through which most hazards reach food security, livelihoods and public health, is not represented.
 
+CropDamage Benchmark addresses that gap. It pairs bi-temporal Sentinel-1 SAR and Sentinel-2 optical imagery with pixel-level labels of *damaged versus unaffected cropland*, across two hazards and roughly 2,760 globally distributed events, and it fixes an evaluation protocol whose central question is generalization: how well does a model trained on past events map damage from an event, or a country, it was never shown?
+
+| | |
+|---|---|
+| **Hazards** | Flood, Burnt area (hazard-agnostic format; see [Extending the benchmark](#extending-the-benchmark)) |
+| **Scale** | 9,888 chips from 2,760 events, 2020 to early 2026 |
+| **Coverage** | 33 countries (Flood), 62 countries (Burnt) |
+| **Inputs** | Pre- and post-event Sentinel-2 L2A (12 bands) and Sentinel-1 GRD (VV, VH), 10 m, 512 × 512 px |
+| **Labels** | Per-pixel: damaged cropland, unaffected cropland, excluded cropland, non-cropland |
+| **Splits** | Event-disjoint train / val / test, plus a whole-country out-of-distribution hold-out per hazard |
+| **Models** | TerraMind, Prithvi-EO-2.0, CROMA, and a U-Net trained from scratch |
+| **Dataset** | [huggingface.co/datasets/eadrah/AgDamage_Benchmark](https://huggingface.co/datasets/eadrah/AgDamage_Benchmark) |
+
+## Contents
+
+1. [Design principles](#design-principles)
+2. [Data preparation pipeline](#data-preparation-pipeline)
+3. [Model design](#model-design)
+4. [Experiments](#experiments)
+5. [Results](#results)
+6. [Extending the benchmark](#extending-the-benchmark)
+7. [Reproducing the experiments](#reproducing-the-experiments)
+8. [Repository layout](#repository-layout)
+9. [Limitations and roadmap](#limitations-and-roadmap)
+
+## Design principles
+
+**Impact, not only extent.** Labels are the intersection of an observed hazard footprint with a cropland layer (USDA CDL, ESA WorldCover). A model is scored on whether it separates damaged from unaffected *cropland*; everything else is masked out of both the loss and the metrics.
+
+**The unit of generalization is the event.** Chips cut from the same disaster share acquisition dates, phenology and terrain, so a random chip-level split leaks. Every split in this benchmark assigns whole events, and the headline metric is averaged over events rather than pixels.
+
+**Two levels of "unseen".** The test split holds unseen events drawn from the same regions as training. A separate hold-out removes an entire country per hazard before any other split is made, and measures transfer to a region the model has no examples from.
+
+**Hazard-agnostic by construction.** Every hazard is stored, split and loaded through the same schema, loader and model interface. Adding a hazard is a data task, not a code change.
+
+**One protocol for every encoder.** Decoder, fusion module, input size, augmentation, loss, optimizer budget and model-selection rule are held constant, so differences in the results table reflect the pretrained representation.
+
+## Data preparation pipeline
+
+```mermaid
+flowchart LR
+    A[Event catalogues<br/>flood and burnt-area records] --> B[Chip construction<br/>pre/post S1 + S2, 10 m, 512 px]
+    C[Cropland layers<br/>USDA CDL, ESA WorldCover] --> D
+    B --> D[Label generation<br/>hazard extent x cropland]
+    D --> E[Quality control<br/>cloud, nodata, edge, speckle flags]
+    E --> F[Event aggregation<br/>severity, centroid, country]
+    F --> G[OOD carve-out<br/>one country per hazard]
+    G --> H[Joint stratified split<br/>severity x geography, event-atomic]
+    H --> I[WebDataset shards<br/>+ Parquet manifest]
 ```
 
-crop_damage/            # Core training / inference code (trainer, models, loaders)
+### Events and chips
 
-configs/                # Experiment and model configs
-Task A: Segmentation
-Task B: Change Detection
+Each sample is a **chip**: a co-registered 512 × 512 tile at 10 m carrying four rasters (Sentinel-1 and Sentinel-2, each before and after the event), a label raster, and a JSON sidecar. The five rasters and the sidecar are treated as one atomic sample throughout the pipeline.
 
-slurm/                  # SLURM launch scripts for cluster training
+| Hazard | Events | Chips | Countries | Event source (manifest tag) |
+|---|---|---|---|---|
+| Flood | 1,297 | 5,102 | 33 | `groundsource` (4,994 chips), Dartmouth Flood Observatory `dfo` (108 chips) |
+| Burnt | 1,463 | 4,786 | 62 | `mcd64-cluster` (burned-area clusters) |
 
-dataset_construction/   # Pipeline for building the benchmark dataset
+The sidecar and the manifest record provenance and context for every chip: event dates, source and confidence tier, country and continent, bounding box, cropland fraction, damaged-cropland fraction, crop phenology stage at the time of the event, per-image acquisition dates and clear-sky fraction, and a quality-control verdict (`clean`, `minor`, `cloudy`, `partial_edge`, `s1_unusable`, `s2_unusable`).
 
-data/                   # input and logs from slurm and experiments
+### Label semantics
+
+Band 1 of the label raster holds four classes. Training uses a three-way remap so that only cropland contributes to the objective:
+
+| Raw value | Meaning | Training class |
+|---|---|---|
+| 1 | Damaged cropland (flooded or burnt) | 2, positive |
+| 2 | Unaffected cropland | 1, negative |
+| 3 | Cropland excluded by quality control | 0, ignored |
+| 4 | Non-cropland | 0, ignored |
+
+A continuous target, the fraction of a chip's cropland that is damaged, is stored alongside the mask. It drives the severity stratification below and supports regression or severity-grading heads on the same imagery.
+
+### Split protocol
+
+Splits are computed once per hazard by [`data/input/stratification/repackage_agdamage.py`](data/input/stratification/repackage_agdamage.py) and [`update_split.py`](data/input/stratification/update_split.py), and are frozen in the manifest. Training code reads the split column and never re-derives it.
+
+1. **Event aggregation.** Chips are grouped by event. Each event receives a severity score (the cropland-pixel-weighted mean of its chips' damaged fraction), a centroid, and a country.
+2. **Out-of-distribution carve-out.** Candidate countries are ranked on three criteria: enough events to be informative, a severity distribution representative of the rest of the hazard (Wasserstein distance), and spatial isolation from all other events (minimum haversine distance). The selected country is removed in full before any other split: the **Philippines** for Flood and **South Africa** for Burnt.
+3. **Joint stratified split.** The remaining events are divided 60 / 20 / 20 into train, validation and test. Strata are the cross of four severity quartiles and a coarse geographic bucket (continent-scale, with sparse regions pooled). Stratifying on severity alone left geography to chance, which on roughly 1,300 events produced measurable train/test shifts; coarse rather than fine geography is deliberate, because fine spatial cells risk placing adjacent events on opposite sides of a split.
+4. **Leakage check.** The script fails if any event appears in more than one split, and records train/val/test severity distances in `split_summary.json` (Wasserstein distance between 0.007 and 0.015 for both hazards).
+
+| Hazard | Train | Validation | Test | OOD hold-out |
+|---|---|---|---|---|
+| Flood, events | 767 | 258 | 251 | 21 |
+| Flood, chips | 3,040 | 1,013 | 981 | 68 |
+| Burnt, events | 863 | 288 | 290 | 22 |
+| Burnt, chips | 2,835 | 927 | 953 | 71 |
+
+### Distribution format
+
+The raw dataset is tens of thousands of loose GeoTIFFs. For training it is repackaged into WebDataset shards with a Parquet manifest, which is what [`AgDamageShardDataset`](crop_damage/datasets/AgDamageShardDataset.py) reads.
 
 ```
+<data_root>/<Hazard>/
+├── manifest.parquet        # one row per chip: ids, split, severity, geography, QC, provenance
+├── split_summary.json      # per-split counts, strata histograms, leakage check
+├── severity_bin_ranges.csv # quartile boundaries used for stratification
+├── ood_candidates.csv      # ranked hold-out candidates with their scores
+└── shards/{train,val,test,ood_holdout}/<split>-NNNNNN.tar
+```
 
- 
+Inside a shard, one chip is six members sharing a key: `<chip_id>.{s1_pre,s1_post,s2_pre,s2_post,label}.tif` and `<chip_id>.json`.
 
-## Quick start
+## Model design
 
- 
+Every model in the benchmark is the same three-stage network. Only the encoder changes.
+
+```mermaid
+flowchart LR
+    P[Pre-event<br/>S1 + S2] --> E1[Encoder]
+    Q[Post-event<br/>S1 + S2] --> E2[Encoder<br/>shared weights]
+    E1 --> F[Change fusion<br/>per feature level]
+    E2 --> F
+    F --> D[U-Net decoder]
+    D --> M[Damage map<br/>cropland pixels only]
+```
+
+**Siamese encoder.** The pre-event and post-event stacks pass through one encoder with shared weights. Foundation-model encoders are frozen by default, so the benchmark measures the quality of the pretrained representation; `encoder.finetune: true` switches to full fine-tuning.
+
+| Encoder | Variant | Pretraining | Integration |
+|---|---|---|---|
+| TerraMind | `terramind_v1_base` | Multimodal generative (S1, S2 and more) | TerraTorch backbone registry |
+| Prithvi-EO-2.0 | `prithvi_eo_v2_tiny_tl` | Masked autoencoding on HLS time series | TerraTorch backbone registry; six HLS-equivalent S2 bands plus VV/VH |
+| CROMA | `croma_base` | Contrastive and masked, joint S1 + S2 | Official implementation vendored; per-layer features captured by forward hooks |
+| U-Net | 5-level, trained from scratch | None | Non-foundation-model reference |
+
+Each encoder has an input adapter that handles band selection and exposes a common interface (`decoder_spec`), so the training loop is model-agnostic.
+
+**Change fusion.** Features from the two dates are combined independently at each selected encoder level. Five interchangeable operators are implemented in [`change_fusion.py`](crop_damage/models/change_fusion.py): signed difference, concatenation of before/after/difference, signed plus absolute difference, a learned Siamese projection, and bidirectional cross-attention between the two dates. The reported experiments use cross-attention fusion.
+
+**Decoder.** A U-Net decoder ([`Decoder_UNet2D.py`](crop_damage/models/Decoder_UNet2D.py)) reshapes transformer tokens from five encoder blocks into a feature pyramid and decodes it to the input resolution.
+
+For the TerraMind configuration the encoder holds 87.7 M frozen parameters; the trainable part is the fusion module (17.7 M) and the decoder (32.6 M).
+
+**Known asymmetries across encoders.** CROMA tokenizes with a fixed 8-pixel patch, so its pyramid has four levels where the others have five, and it is run at 224 px rather than its 120 px pretraining resolution to keep input size identical across models. These are stated limitations of the comparison, not hidden implementation details.
+
+## Experiments
+
+### Tasks
+
+**Task A, damage segmentation (implemented).** Per-pixel classification of cropland into damaged and unaffected, from the bi-temporal S1 + S2 pair.
+
+**Task B, change detection (planned).** Prediction of the pre-to-post change mask as a separate target. The Siamese path and fusion operators it requires are already in place; the task definition and configs are not yet final.
+
+### Training protocol
+
+| Setting | Value |
+|---|---|
+| Input | 224 × 224 patches tiled from each 512 × 512 chip, standardised per patch |
+| Modalities | Sentinel-2 L2A and Sentinel-1 GRD, both dates |
+| Augmentation | Random flips and 90° rotations, applied identically to both dates and the label |
+| Loss | Cross-entropy over cropland pixels (Dice, focal and class-weighted variants available) |
+| Optimizer | Adam, `ReduceLROnPlateau` (factor 0.5), early stopping on validation loss |
+| Model selection | Checkpoint with the lowest validation loss |
+
+Chips without a usable Sentinel-1 acquisition are dropped when S1 is requested (about 2 to 3 % of chips), which is why evaluated chip counts are slightly below the manifest counts.
+
+### Evaluation protocol
+
+Predictions are stitched back to full chips, masked to cropland, and scored on the damaged-cropland class with IoU, F1, precision, recall and accuracy.
+
+- **Event-macro (headline).** Metrics are computed per event from pooled pixel counts, then averaged over events. This weights a small event the same as a large one and is the number that reflects generalization. A 95 % confidence interval comes from a percentile bootstrap over events (2,000 resamples).
+- **Micro.** Pixel counts pooled over the whole split, reported for comparison with pixel-level benchmarks.
+- **Two evaluation sets per hazard.** The in-distribution test split (unseen events) and the country-level OOD hold-out (unseen region).
+
+Every evaluation writes `metrics.txt`, a machine-readable `metrics.json` with per-event values, georeferenced prediction GeoTIFFs, and optional three-panel figures.
+
+### Hyperparameter selection
+
+Hyperparameters are chosen on the validation split only. Sweeps run with the test and OOD loaders disabled, so no test information can reach model selection; the selected checkpoint is evaluated on the held-out sets once, afterwards.
+
+Each sweep is a W&B random search over learning rate (log-uniform, 1e-4 to 3e-3) and batch size (8 or 16), with Hyperband early termination and a fixed budget of 12 trials and 12 epochs per trial. The same search space and budget are applied to every encoder.
+
+## Results
+
+Results below are for **TerraMind-base with a frozen encoder**, selected by the protocol above, single seed. Brackets are 95 % bootstrap confidence intervals over events.
+
+| Train / test hazard | Evaluation set | Events | Chips | Macro IoU | Macro F1 | Micro IoU | Micro F1 |
+|---|---|---|---|---|---|---|---|
+| Flood | Test (unseen events) | 245 | 959 | 0.444 [0.415, 0.473] | 0.579 [0.551, 0.608] | 0.551 | 0.710 |
+| Flood | OOD (Philippines) | 21 | 68 | 0.354 [0.266, 0.451] | 0.485 [0.381, 0.592] | 0.440 | 0.611 |
+| Burnt | Test (unseen events) | 280 | 923 | 0.569 [0.546, 0.594] | 0.700 [0.678, 0.723] | 0.602 | 0.752 |
+| Burnt | OOD (South Africa) | 22 | 71 | 0.302 [0.241, 0.362] | 0.443 [0.365, 0.522] | 0.319 | 0.484 |
+
+Selected configurations: Flood, learning rate 1.2e-4 and batch size 16; Burnt, learning rate 1.1e-4 and batch size 8.
+
+### What the results show
+
+**The task is far from solved.** A frozen state-of-the-art multimodal foundation model reaches an event-macro IoU of 0.44 on flooded cropland and 0.57 on burnt cropland for unseen events in familiar regions.
+
+**Regional transfer is the hard problem.** Moving from unseen events to an unseen country lowers event-macro IoU from 0.44 to 0.35 for Flood and from 0.57 to 0.30 for Burnt. For Burnt the confidence intervals do not overlap. With about 20 events in each hold-out the OOD intervals are wide, and should be read as such.
+
+**Event-level and pixel-level scores disagree.** Micro IoU is consistently higher than event-macro IoU (0.55 against 0.44 for Flood). Large, clearly damaged events dominate pixel counts; small events are where models fail. Reporting only pixel-pooled scores would overstate performance.
+
+**Learning rate matters more for Flood than for Burnt.** Validation IoU for Flood rises from about 0.3 at learning rates above 2e-3 to 0.59 at 1e-4, then is flat down to 3e-5. For Burnt, validation IoU stays between 0.55 and 0.62 across the whole range, and the model shows high recall with lower precision, a tendency to over-predict burnt cropland that learning-rate tuning does not remove.
+
+### Qualitative examples
+
+Each example is the test chip whose IoU is closest to that hazard's test-set micro IoU, so it shows typical rather than best-case behaviour. Panels are ground truth, prediction, and their difference; non-cropland is masked.
+
+![Flood example](docs/figures/qualitative_flood_test.png)
+
+![Burnt example](docs/figures/qualitative_burnt_test.png)
+
+### Experiment status
+
+| Experiment | Status |
+|---|---|
+| TerraMind, frozen, Flood and Burnt, tuned | Reported above |
+| Prithvi-EO-2.0, CROMA and U-Net under the same tuned protocol | In progress |
+| Pooled training (Flood + Burnt) with per-hazard breakdown | Configs available |
+| Leave-one-hazard-out transfer (train on one hazard, test on the other) | Supported by the evaluator; not yet reported |
+| Frozen against fully fine-tuned encoders | Supported (`encoder.finetune`); not yet reported |
+| Change detection (Task B) | Planned |
+
+## Extending the benchmark
+
+Nothing in the format, loader, split procedure or model interface is specific to floods, fire or crops. A new hazard needs four things:
+
+1. An event catalogue with dates and footprints.
+2. Pre- and post-event Sentinel-1 and Sentinel-2 chips over each event.
+3. A label raster formed by intersecting the hazard footprint with an exposure layer.
+4. One scalar per chip measuring how much of the exposed area is affected, used for severity stratification.
+
+The repackaging and split scripts then produce an event-disjoint, severity- and geography-stratified split with a regional hold-out, and a new hazard directory is selected in a config with `hazards: [<Name>]`. Pooled and leave-one-hazard-out experiments follow from listing more than one hazard.
+
+Two directions follow naturally from this design:
+
+- **Further hazards.** Landslides and conflict-related damage are sudden-onset events that fit the bi-temporal format directly. Slow-onset and land-surface hazards, such as agricultural drought, crop failure, and the bare, desiccated cropland that becomes a source area for wind erosion and dust, share the same structure of a hazard footprint over an exposed land cover; they call for a longer pre-event temporal context than a single image pair, which the Siamese design extends to.
+- **Further exposure layers.** The cropland mask is one choice of exposure layer. Replacing it with population, settlement or health-facility catchment layers turns the same pipeline from mapping agricultural damage into mapping where people are exposed, which is the input that risk-zone delineation for environmental-health studies requires.
+
+## Reproducing the experiments
+
+### Environment
+
+The code was developed with Python 3.12, PyTorch 2.10, TerraTorch 1.1, Hydra 1.3, WebDataset 1.0, rasterio 1.4 and W&B 0.25.
 
 ```bash
-
 git clone https://github.com/JulinaM/Crop-Damage-Benchmark.git
-
 cd Crop-Damage-Benchmark
-
-python -m venv .venv && source .venv/bin/activate
-
-pip install -r requirements.txt
-
- 
-
-# small experiment on 2 GPUs
-
-torchrun --nproc_per_node=2 crop_damage/trainer.py -m ++train_loader=test
-
- 
-
-# scheduled training on SLURM
-
-sbatch slurm/terramind.slurm
-
-sbatch --export=DATA_SIZE=test,SLURM_LOG_LEVEL=debug slurm/terramind.slurm
-
+pip install torch torchvision terratorch hydra-core webdataset rasterio pandas pyarrow wandb
 ```
 
- 
+TerraMind and Prithvi weights are fetched through TerraTorch. CROMA weights (`CROMA_base.pt`) are downloaded once from the official release into `data/checkpoints/croma/`.
 
-SLURM options: `DATA_SIZE=large|test` (default `large`), `SLURM_LOG_LEVEL=debug`.
+### Data
 
- 
+Download the dataset from Hugging Face, then build the splits and shards:
 
-## Dataset
-
-*(To do)*
-
-The benchmark dataset is built from raw Sentinel-1/Sentinel-2 scenes and split into
-Train/Validation/Test sets stratified by hazard and agroecological context.
-Full dataset: **[huggingface.co/datasets/eadrah/AgDamage_Benchmark](https://huggingface.co/datasets/eadrah/AgDamage_Benchmark)**.
-
-Each sample is a **chip**: a co-registered 512x512 tile at 10m resolution carrying pre/post-event
-Sentinel-1 SAR + Sentinel-2 optical imagery and a 3-class damage label (unaffected / non-crop / damaged),
-built by pairing the observed disaster extent (flood inundation, burn scar, ...) against cropland masks
-(USDA CDL / ESA WorldCover). Two hazards are currently populated: **Flood** and **Burnt**.
-
-See [`dataset_construction/`](dataset_construction/) for the raw-data collection pipeline, and
-[`data/input/repackage_agdamage.py`](data/input/repackage_agdamage.py) for the repackaging script
-described below.
-
-### Raw layout (`AgDamage_raw`) and metadata
-
-The as-downloaded HF dataset is organized one folder per disaster event:
-
-```
-AgDamage_raw/<Hazard>/
-├── events_master.csv        # one row per event: bbox, date range, continent/country,
-│                             # source (DFO/groundsource/...), tier, corroboration count,
-│                             # gfm_flood_km2, n_chips, batch, ...
-├── qc_chips.csv              # one row per chip: clear_frac, nodata_frac, edge_cc,
-│                             # is_partial/is_white/is_corrupt/is_cloudy/is_speckle flags, ...
-└── chips/<event_id>/
-    ├── <chip_id>_label.tif
-    ├── <chip_id>_s2_pre.tif / _s2_post.tif
-    ├── <chip_id>_s1_pre.tif / _s1_post.tif
-    └── <chip_id>.json        # per-chip sidecar: event provenance (source, tier, confirming
-                               # agencies), event_date_start/end, crs, bbox (min/max lon/lat),
-                               # cropland_frac, flooded_crop_frac / excluded_crop_frac,
-                               # per-image acquisition date + clear_frac for each of the 4 rasters
+```bash
+python data/input/stratification/update_split.py --root <path/to/AgDamage> --hazards Flooded \
+    --strata-mode joint --ood-regions '{"Flooded": ["Philippines"]}' --reshard
+python data/input/stratification/update_split.py --root <path/to/AgDamage> --hazards Burnt \
+    --strata-mode joint --ood-regions '{"Burnt": ["South Africa"]}' --reshard
 ```
 
-### Repackaged distribution format (`AgDamage_v2` — used for training)
+Point `data_root` in the configs at the resulting `<root>_resharded/` directory.
 
-The raw layout is tens of thousands of loose files, which trips the HF API's rate limit.
-`repackage_agdamage.py` converts it into **WebDataset shards + a Parquet manifest**:
+### Train and evaluate
 
-```
-AgDamage_v2/<Hazard>/
-├── manifest.parquet / manifest.csv   # one row per chip: chip_id, event_id, hazard, split,
-│                                      #   severity, severity_class, shard, + any lat/lon/date/crs
-│                                      #   fields present in the chip's sidecar
-├── split_summary.json                # per-split chip/event counts, severity_class histogram,
-│                                      #   and an explicit event-leakage check (see below)
-├── dropped_chips.csv                 # chips missing one of the 5 required rasters, with reason
-└── shards/{train,val,test}/<split>-NNNNNN.tar
+```bash
+# single run: trains, then evaluates the best checkpoint on test and OOD
+python -m crop_damage --config-name=segmentation/terramind_flood
+
+# any setting can be overridden from the command line
+python -m crop_damage --config-name=segmentation/terramind_burnt model.learning_rate=1e-4 trainer.n_epochs=12
 ```
 
-Inside a shard, one chip = 6 tar members sharing a key: `<chip_id>.{s1_pre,s1_post,s2_pre,s2_post,label}.tif`
-+ `<chip_id>.json` (the manifest row, duplicated per-chip). `AgDamageShardDataset` (see
-[`crop_damage/datasets/AgDamageShardDataset.py`](crop_damage/datasets/AgDamageShardDataset.py)) reads
-these directly at train/eval time.
+### Hyperparameter search
 
-### Split & stratification logic
+```bash
+wandb sweep sweeps/terramind_flood.yaml          # prints <entity>/<project>/<sweep_id>
+wandb agent --count 1 <entity>/<project>/<sweep_id>
 
-Splits are assigned **per event, not per chip** — every chip belonging to an event goes to exactly one
-of train/val/test, so no event straddles splits (spatial autocorrelation between chips of the same event
-would otherwise leak signal across the split boundary). `main()` runs the whole repackaging pipeline
-**once per hazard**, writing each hazard's shards/manifest/split into its own `AgDamage_v2/<Hazard>/`
-tree (never merged), so `assign_splits()` below is always called on a single hazard's chips at a time.
-Concretely, `assign_splits()`:
+# evaluate the sweep's best run on the held-out sets
+python -m crop_damage.utils.best_sweep_run <entity>/<project>/<sweep_id>
+python -m crop_damage.utils.eval_checkpoint <run_dir> configs/segmentation/terramind_flood.yaml
+```
 
-1. Groups chips by `event_id`, and buckets each event into a severity class (`none` / `minor` / `moderate`
-   / `severe` / `catastrophic`) from the mean of its chips' damage-fraction field — resolved generically
-   via `SEVERITY_FIELD_CANDIDATES` (e.g. `flooded_crop_frac` for Flood, `burned_crop_frac` for Burnt), so
-   the same bucketing logic works for both hazards.
-2. Groups events into strata keyed by `(hazard, severity_class)`. Since `assign_splits()` is now always
-   called with one hazard's chips already isolated, `hazard` is constant per call and this reduces in
-   practice to stratifying by `severity_class` alone — the key is kept for robustness in case the function
-   is ever called with a mixed-hazard chip list again.
-3. Within each stratum, assigns whole events to train/val/test with a greedy largest-first bin-packing
-   pass: events are sorted by descending chip count (random tiebreak on a fixed seed, for reproducibility),
-   then walked in that order, each one assigned in full to whichever split is currently furthest below its
-   target chip-count quota (`target - quota`, maximized). Quotas are targets over **chip volume**, not
-   event count, so one very large event can't dominate a split. This is a greedy heuristic, not a globally
-   optimal partition — per-stratum split sizes converge toward the configured ratios (default 70/15/15) but
-   won't hit them exactly, especially for small strata (e.g. a severity class with very few events for that
-   hazard), since an event's chips can't be split across quotas.
-4. Writes `split_summary.json` with an explicit **event-disjointness check**: the script hard-fails
-   (`SystemExit(2)`) if any event ends up in more than one split.
+The scripts in [`slurm/`](slurm/) wrap these commands for a SLURM cluster (`sweep_agent.slurm` runs one trial per array task; `eval_sweep_best.slurm` evaluates the winner). They contain site-specific paths and module names that need adapting.
 
-**Known gaps for the team to review before treating this as final:**
-- The proximity-buffering step described in `CLAUDE.md` §4 (clustering events close in space *and* time
-  into one super-group before splitting, with a spatial dead-zone between train/test) is not implemented
-  in this script — only event-atomicity + severity-stratification + volume-balancing are.
-- The numbers table previously shown here (Flood 160/38, Burnt 1000/315) predates three fixes: Burnt was
-  being skipped entirely in `discover_chips()`, `main()` hard-truncated to `chips[:1000]`, and
-  `SEVERITY_FIELD_CANDIDATES` had no burnt-specific field (so Burnt severity was `unknown` for every chip).
-  All three are now fixed — re-run `repackage_agdamage.py` against the full raw dataset to regenerate
-  `AgDamage_v2/` and replace this table with current numbers before relying on it.
+### Figures and tables
 
-## Evaluation Design
+```bash
+python -m crop_damage.utils.collect_loho_results data/experiments --out report.csv
+```
 
-### Task A: Segmentation
+[`crop_damage/examples/3_reconstruct_test_tiles.ipynb`](crop_damage/examples/3_reconstruct_test_tiles.ipynb) renders the three-panel figures from saved predictions.
 
-Per-pixel damage classification (unaffected / non-crop / damaged) on each hazard, holding the rest of
-the training protocol constant across models (decoder, patch size, augmentation, criterion, optimizer
-budget — see `configs/segmentation/*.yaml`) so differences in results reflect the encoder, not the setup.
-Three encoders × three hazard scopes = 9 configs:
+## Repository layout
 
-| Encoder | Flood | Burnt | Pooled |
-|---|---|---|---|
-| Terramind | `terramind_flood.yaml` | `terramind_burnt.yaml` | `terramind_pooled.yaml` |
-| U-Net (non-FM floor) | `unet_flood.yaml` | `unet_burnt.yaml` | `unet_pooled.yaml` |
-| Prithvi | `prithvi_flood.yaml` | `prithvi_burnt.yaml` | `prithvi_pooled.yaml` |
+```
+crop_damage/
+├── main.py                  # Hydra entry point: data, model, training, evaluation
+├── Trainer.py               # training loop, early stopping, checkpointing, logging
+├── Evaluator.py             # tile reconstruction, event-macro metrics, bootstrap CIs, GeoTIFFs
+├── datasets/                # AgDamageShardDataset: shard reader, patching, augmentation
+├── models/                  # encoders and input adapters, change fusion, U-Net decoder
+├── utils/                   # losses, checkpoint evaluation, sweep selection, figures
+└── examples/                # notebooks: chip inspection, hold-out demo, figure rendering
+configs/
+├── base.yaml                # shared defaults
+├── dataset/                 # per-hazard data groups (flood, burnt, pooled)
+└── segmentation/            # one config per encoder and hazard, plus sweep variants
+sweeps/                      # W&B sweep definitions
+slurm/                       # cluster launch scripts
+data/input/stratification/   # repackaging, OOD selection and split scripts; analysis notebooks
+dataset_construction/        # raw-data collection notes
+```
 
-- **Flood / Burnt** configs train on one hazard and evaluate two ways: **in-distribution** (same hazard's
-  test split) and **leave-one-hazard-out (LOHO)** — zero-shot on the *other* hazard's test split, the
-  headline cross-hazard generalization check.
-- **Pooled** configs train on both hazards together and evaluate in-distribution on the pooled test split
-  plus a per-hazard breakdown, so pooling gains/losses are visible per hazard rather than averaged away.
-- **U-Net** is the from-scratch, non-foundation-model floor — run first, before treating any FM's number
-  as meaningful, since it's the only way to tell whether a foundation model is actually adding value here.
-- Reported metrics are macro-averaged **by event** (with bootstrap CIs) as the headline number, plus a
-  micro (pixel-pooled) number — see `Evaluator._macro_and_micro_metrics`.
+## Limitations and roadmap
 
-### Task B: Change Detection
-
-*(Empty — not yet designed/implemented.)* Scaffolded at `configs/change_detection/` (see its README)
-mirroring Task A's 3-encoder × 3-hazard-scope layout once ready.
-
-### Future work: Finetune vs. Frozen FMs
-
-`encoder.finetune` (true/false) already exists per-config, but every current config picks one setting
-rather than running both. Per `CLAUDE.md` §5's fairness protocol, both should be reported for each
-foundation model — frozen-encoder as the default probe of pretrained representation quality, full
-fine-tune for the top-performing model(s) — since which one wins can flip the ranking between FMs.
-
+- **Single seed.** Reported numbers come from one run per configuration. Between-seed variance has not been measured, and small differences between configurations should not be over-read.
+- **One encoder reported so far.** Tuned results for Prithvi-EO-2.0, CROMA and the U-Net reference are needed before any claim about which foundation model is best, or about what pretraining adds over training from scratch.
+- **Small regional hold-outs.** Each OOD set is one country with roughly 20 events. It demonstrates a transfer gap; it does not characterise transfer in general. Additional hold-out regions are planned.
+- **No spatial buffer between splits.** Splits are event-disjoint and stratified, but nearby events are not yet clustered into super-groups with a dead-zone between train and test.
+- **Quality flags are recorded, not enforced.** Per-chip QC verdicts are carried in the manifest; the current runs filter only on Sentinel-1 availability.
+- **Frozen encoders only.** Fine-tuning, parameter-efficient adaptation, and data-scarce regimes (training on a limited number of events) are next.
+- **Labels inherit their sources.** Damage labels are derived from hazard-extent products and cropland layers, and carry the errors of both.
 
 ## Acknowledgements
 
- 
-
-Builds on the [TerraMind](https://github.com/IBM/terramind) foundation model and the
-
-Copernicus Sentinel-1/2 missions; originated from research code in
-
-[DamageMappingTerramind](https://github.com/JulinaM/DamageMappingTerramind).
-
- 
+This work builds on [TerraMind](https://github.com/IBM/terramind), [Prithvi-EO-2.0](https://github.com/NASA-IMPACT/Prithvi-EO-2.0), [CROMA](https://github.com/antofuller/CROMA) and [TerraTorch](https://github.com/IBM/terratorch), and on data from the Copernicus Sentinel-1 and Sentinel-2 missions. The evaluation design draws on [PANGAEA](https://github.com/VMarsocci/pangaea-bench) and GEO-Bench. The codebase originated from [DamageMappingTerramind](https://github.com/JulinaM/DamageMappingTerramind).
 
 ## License
 
- 
-
-MIT — see [`LICENSE`](LICENSE).
-
+Code is released under the MIT license. The vendored CROMA implementation retains its original MIT license.
