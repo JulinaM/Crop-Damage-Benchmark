@@ -14,7 +14,7 @@ experiment_name: ${task}_unet_pooled
 train_loader:
   dataset: agdamage_shard
   data_root: data/input/J_AgDamage/AgDamage_v2
-  hazards: [Flood, Burnt]
+  hazards: [Flooded, Burnt]
   modalities:
     S2L2A: {}
     S1GRD: {}
@@ -31,7 +31,7 @@ train_loader:
 validation_loader:
   dataset: agdamage_shard
   data_root: data/input/J_AgDamage/AgDamage_v2
-  hazards: [Flood, Burnt]
+  hazards: [Flooded, Burnt]
   modalities:
     S2L2A: {}
     S1GRD: {}
@@ -50,7 +50,7 @@ eval_loaders:
   in_distribution_pooled:
     dataset: agdamage_shard
     data_root: data/input/J_AgDamage/AgDamage_v2
-    hazards: [Flood, Burnt]
+    hazards: [Flooded, Burnt]
     split: test
     modalities:
       S2L2A: {}
@@ -63,7 +63,7 @@ eval_loaders:
   in_distribution_flood:
     dataset: agdamage_shard
     data_root: data/input/J_AgDamage/AgDamage_v2
-    hazards: [Flood]
+    hazards: [Flooded]
     split: test
     modalities:
       S2L2A: {}

@@ -1,0 +1,26 @@
+# Follow-up to sweeps/prithvi_flood.yaml: its two full-length runs (lr 1.2e-4
+# and 2.5e-4) were still improving at epoch 12, so rerun both with a 24-epoch
+# budget. No early termination; everything else as in prithvi_flood_sweep.yaml.
+#   sbatch --job-name=PR_long --array=0-1 --time=24:00:00 \
+#          --export=SWEEP_ID=<entity/project/id> slurm/sweep_agent.slurm
+project: Crop-Damage-Benchmark
+entity: julinam-kent-state-university
+name: prithvi_flood_long
+program: crop_damage/main.py
+method: grid
+metric:
+  name: best/IoU
+  goal: maximize
+parameters:
+  model.learning_rate:
+    values: [1.2e-4, 2.5e-4]
+  trainer.n_epochs:
+    value: 24
+command:
+  - ${env}
+  - python3
+  - -u
+  - -m
+  - crop_damage
+  - --config-name=segmentation/prithvi_flood_sweep
+  - ${args_no_hyphens}

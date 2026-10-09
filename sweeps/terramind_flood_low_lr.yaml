@@ -1,0 +1,22 @@
+# Follow-up to sweeps/terramind_flood.yaml: that sweep's best learning rate
+# (~1.2e-4) was at the bottom edge of its range, so probe below it.
+# Three full-length runs, no early termination, batch size left at the default 16.
+project: Crop-Damage-Benchmark
+entity: julinam-kent-state-university
+name: terramind_flood_low_lr
+program: crop_damage/main.py
+method: grid
+metric:
+  name: best/IoU
+  goal: maximize
+parameters:
+  model.learning_rate:
+    values: [3.0e-5, 6.0e-5, 1.0e-4]
+command:
+  - ${env}
+  - python3
+  - -u
+  - -m
+  - crop_damage
+  - --config-name=segmentation/terramind_flood_sweep
+  - ${args_no_hyphens}

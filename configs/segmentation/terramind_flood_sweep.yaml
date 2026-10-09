@@ -1,0 +1,33 @@
+# @package _global_
+# Hyperparameter-search variant of terramind_flood: same data/model, but set up
+# for W&B sweeps (see sweeps/terramind_flood.yaml and slurm/sweep_agent.slurm).
+defaults:
+  - terramind_flood
+  - _self_
+
+use_wandb: True
+
+# Selection is done on validation only -- skip the test / ood_holdout evals so
+# the search never sees them (and to save time per trial).
+eval_loaders: null
+
+train_loader:
+  # 1 instead of 5: an epoch is 5x shorter, so validation (and the sweep's
+  # early termination) happens 5x more often for the same number of updates.
+  num_augmentations: 1
+
+trainer:
+  n_epochs: 12
+  log_interval: 100
+  early_stopping_patience: 4
+  scheduler:
+    name: ReduceLROnPlateau
+    factor: 0.5
+    patience: 2
+    min_lr: 1e-6
+
+hydra:
+  run:
+    # WANDB_RUN_ID is set by `wandb agent`; keeps parallel trials that start in
+    # the same second from sharing a run dir (and each other's checkpoints).
+    dir: ${hydra:runtime.cwd}/data/experiments/sweeps/terramind_flood/${now:%Y-%m-%d_%H%M%S}_${oc.env:WANDB_RUN_ID,local}

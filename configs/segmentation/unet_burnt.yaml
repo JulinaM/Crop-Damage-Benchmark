@@ -67,7 +67,7 @@ eval_loaders:
   loho_flood:
     dataset: agdamage_shard
     data_root: data/input/J_AgDamage/AgDamage_v2
-    hazards: [Flood]
+    hazards: [Flooded]
     split: test
     modalities:
       S2L2A: {}

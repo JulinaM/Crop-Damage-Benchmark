@@ -1,0 +1,33 @@
+# W&B sweep for configs/segmentation/prithvi_flood_sweep.yaml (frozen Prithvi).
+#   wandb sweep sweeps/prithvi_flood.yaml      # prints the SWEEP_ID
+#   sbatch --job-name=PR_sweep --array=0-6%4 --time=10:00:00 \
+#          --export=SWEEP_ID=<entity/project/id> slurm/sweep_agent.slurm
+#
+# One grid over learning rate, spanning the full range the two TerraMind flood
+# sweeps covered (3e-5 .. 3e-3). Batch size is fixed at 16: it made no
+# measurable difference for TerraMind.
+project: Crop-Damage-Benchmark
+entity: julinam-kent-state-university
+name: prithvi_flood_hparams
+program: crop_damage/main.py
+method: grid
+metric:
+  # val IoU of the damaged-crop class at the epoch with the lowest val loss,
+  # i.e. the checkpoint that would actually be kept.
+  name: best/IoU
+  goal: maximize
+early_terminate:
+  type: hyperband
+  min_iter: 3
+  eta: 2
+parameters:
+  model.learning_rate:
+    values: [3.0e-5, 6.0e-5, 1.2e-4, 2.5e-4, 5.0e-4, 1.0e-3, 3.0e-3]
+command:
+  - ${env}
+  - python3
+  - -u
+  - -m
+  - crop_damage
+  - --config-name=segmentation/prithvi_flood_sweep
+  - ${args_no_hyphens}

@@ -1,7 +1,7 @@
 # @package _global_
 defaults:
   - /base
-  - /dataset: flood
+  - /dataset: burnt
   - _self_
 
 # Label class_remap and model.{ignore_index,negative_class,positive_class} are
@@ -17,7 +17,7 @@ experiment_name: ${task}_croma_${dataset_name}
 
 train_loader:
   dataset: agdamage_shard
-  data_root: data/input/J_AgDamage/AgDamage_v2
+  data_root: /fs/ess/PGS0413/AgDamage_Benchmark_v2_resharded
   modalities:
     S2L2A: {}
     S1GRD: {}
@@ -32,7 +32,7 @@ train_loader:
 
 validation_loader:
   dataset: agdamage_shard
-  data_root: data/input/J_AgDamage/AgDamage_v2
+  data_root: /fs/ess/PGS0413/AgDamage_Benchmark_v2_resharded
   modalities:
     S2L2A: {}
     S1GRD: {}
@@ -49,7 +49,7 @@ model:
   positive_class: 2
   negative_class: 1
   ignore_index: 0
-  learning_rate: 0.0005
+  learning_rate: 0.001
   num_epochs: 8
   seed: 22
 
@@ -84,8 +84,14 @@ decoder:
   channels: [64, 128, 256, 512]  # 4 entries -- must match encoder.feature_indices length
 
 trainer:
-  n_epochs: 4
+  n_epochs: 2
   log_interval: 1
+  early_stopping_patience: 2
+  scheduler:
+    name: ReduceLROnPlateau
+    factor: 0.5
+    patience: 3
+    min_lr: 1e-6
 
 use_wandb: False
 

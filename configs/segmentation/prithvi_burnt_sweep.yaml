@@ -1,0 +1,46 @@
+# @package _global_
+# Hyperparameter-search variant of prithvi_burnt: same data/model, but set up
+# for W&B sweeps (see sweeps/prithvi_burnt.yaml and slurm/sweep_agent.slurm).
+# Training protocol is kept identical to terramind_burnt_sweep.yaml so the two
+# encoders are tuned under the same budget.
+defaults:
+  - prithvi_burnt
+  - _self_
+
+use_wandb: True
+
+# Selection is done on validation only -- skip the test / ood_holdout evals so
+# the search never sees them (and to save time per trial). The winner is
+# evaluated afterwards by slurm/eval_sweep_best.slurm.
+eval_loaders: null
+
+train_loader:
+  # 1 instead of 5: an epoch is 5x shorter, so validation (and the sweep's
+  # early termination) happens 5x more often for the same number of updates.
+  num_augmentations: 1
+  # prithvi_burnt.yaml uses 512; 224 here so the input size matches the
+  # TerraMind burnt sweep (terramind_burnt.yaml) and the two are comparable.
+  # Evaluate the winner with terramind_burnt.yaml's (224) eval_loaders.
+  patch_size: 224
+  # Speed only (prithvi_burnt uses 2).
+  num_workers: 4
+
+validation_loader:
+  patch_size: 224
+  num_workers: 4
+
+trainer:
+  n_epochs: 12
+  log_interval: 100
+  early_stopping_patience: 4
+  scheduler:
+    name: ReduceLROnPlateau
+    factor: 0.5
+    patience: 2
+    min_lr: 1e-6
+
+hydra:
+  run:
+    # WANDB_RUN_ID is set by `wandb agent`; keeps parallel trials that start in
+    # the same second from sharing a run dir (and each other's checkpoints).
+    dir: ${hydra:runtime.cwd}/data/experiments/sweeps/prithvi_burnt/${now:%Y-%m-%d_%H%M%S}_${oc.env:WANDB_RUN_ID,local}

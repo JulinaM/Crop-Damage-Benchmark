@@ -1,0 +1,38 @@
+# @package _global_
+dataset_name: burnt
+
+train_loader:
+  hazards: [Burnt]
+  patch_size: 512
+
+validation_loader:
+  hazards: [Burnt]
+  patch_size: 512
+
+eval_loaders:
+  in_distribution:
+    dataset: agdamage_shard
+    data_root: /fs/ess/PGS0413/AgDamage_Benchmark_v2_resharded
+    hazards: [Burnt]
+    split: test
+    modalities:
+      S2L2A: {}
+      S1GRD: {}
+    label_band: 1
+    label_nodata: 255
+    class_remap: {1: 2, 2: 1, 3: 0, 4: 0}
+    patch_size: 512
+    num_workers: 2
+  loho_flood:
+    dataset: agdamage_shard
+    data_root: /fs/ess/PGS0413/AgDamage_Benchmark_v2_resharded
+    hazards: [Flooded]
+    split: test
+    modalities:
+      S2L2A: {}
+      S1GRD: {}
+    label_band: 1
+    label_nodata: 255
+    class_remap: {1: 2, 2: 1, 3: 0, 4: 0}
+    patch_size: 512
+    num_workers: 2

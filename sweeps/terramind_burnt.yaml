@@ -1,0 +1,33 @@
+# W&B sweep for configs/segmentation/terramind_burnt_sweep.yaml
+#   wandb sweep sweeps/terramind_burnt.yaml      # prints the SWEEP_ID
+#   sbatch --export=SWEEP_ID=<entity/project/id> slurm/sweep_agent.slurm
+project: Crop-Damage-Benchmark
+entity: julinam-kent-state-university
+name: terramind_burnt_hparams
+program: crop_damage/main.py
+method: random
+run_cap: 12
+metric:
+  # val IoU of the damaged-crop class at the epoch with the lowest val loss,
+  # i.e. the checkpoint that would actually be kept.
+  name: best/IoU
+  goal: maximize
+early_terminate:
+  type: hyperband
+  min_iter: 3
+  eta: 2
+parameters:
+  model.learning_rate:
+    distribution: log_uniform_values
+    min: 1.0e-4
+    max: 3.0e-3
+  train_loader.batch_size:
+    values: [8, 16]
+command:
+  - ${env}
+  - python3
+  - -u
+  - -m
+  - crop_damage
+  - --config-name=segmentation/terramind_burnt_sweep
+  - ${args_no_hyphens}
