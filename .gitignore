@@ -11,3 +11,4 @@
 /data/claude-summary/*
 /CLAUDE.md
 /claude-artifacts
+*.pyc
